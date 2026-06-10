@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hoverdeck"
+version = "0.1.0"
+description = "Frameless always-on-top desktop deck of scriptable keycaps (industrial control-panel style)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "PyQt6>=6.6",
+    "pynput>=1.7.6",
+    "cryptography>=42.0",
+    "mss>=9.0",
+    "Pillow>=10.0",
+    "httpx>=0.27",
+    'pywin32>=306; sys_platform == "win32"',
+    'keyboard>=0.13.5; sys_platform == "win32"',
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    'pyinstaller>=6.0; sys_platform == "win32"',
+]
+
+[tool.setuptools.packages.find]
+include = ["hoverdeck*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,0 +1,29 @@
+# Runtime data (decks, macros, vault, settings, logs)
+data/
+
+# Your private scripts
+scripts/*
+!scripts/.gitkeep
+
+# Encrypted vault blobs anywhere
+*.enc
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.coverage
+
+# Packaging
+build/
+dist/
+*.spec
+
+# Editors / OS
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
