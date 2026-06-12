@@ -49,11 +49,24 @@ jobs:
             /DMyAppVersion=${{ steps.ver.outputs.version }} `
             installer\hoverdeck.iss
 
+      # Always available: download these from the workflow run page to test the
+      # installer/exe WITHOUT cutting a release (manual runs land here).
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: HoverDeck-${{ steps.ver.outputs.version }}
+          path: |
+            dist/HoverDeck-Setup-*.exe
+            dist/HoverDeck.exe
+
+      # Publish a GitHub Release ONLY when a version tag was pushed.
       - name: Publish Release
+        if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           name: HoverDeck ${{ steps.ver.outputs.version }}
           generate_release_notes: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: |
             dist/HoverDeck-Setup-*.exe
             dist/HoverDeck.exe
