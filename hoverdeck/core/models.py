@@ -238,12 +238,20 @@ class Settings:
     autostart: bool = False
     relock_timeout_s: int = 60
     reduce_motion: bool = False
+    monitor: str = ""                 # QScreen.name() to dock on; "" = primary
+    dock_y: int = -1                  # deck top, px below the monitor top; -1 = default
+    vault_visible: bool = True        # show the vault page dot (when unlocked)
+    vpn_overlay: bool = False         # show a VPN connected/disconnected indicator
+    vpn_adapter_hint: str = ""        # extra adapter-name keyword for odd providers
     peek_enabled: bool = False
     peek_edge: str = "right"          # left | right | top | bottom
     peek_offset: int = 120            # position along the tucked edge, px
     ai_provider: str = "anthropic"    # anthropic | openai
+    ai_model: str = ""                # model id; "" = the provider's default
     ai_api_key: str = ""              # stored locally; sent only to the provider
     ai_panel_mode: str = "slide"      # slide | floating
+    ai_panel_side: str = "auto"       # auto | left | right (relative to the deck)
+    script_python: str = ""           # interpreter for 'Run a script' ("" = auto)
     secret_trigger: SecretTrigger = field(default_factory=SecretTrigger)
     global_hotkeys: dict[str, str] = field(default_factory=dict)
     profiles: list[WindowProfile] = field(default_factory=list)
@@ -268,12 +276,22 @@ class Settings:
             autostart=bool(data.get("autostart", defaults.autostart)),
             relock_timeout_s=int(data.get("relock_timeout_s", defaults.relock_timeout_s)),
             reduce_motion=bool(data.get("reduce_motion", defaults.reduce_motion)),
+            monitor=str(data.get("monitor", defaults.monitor)),
+            dock_y=int(data.get("dock_y", defaults.dock_y)),
+            vault_visible=bool(data.get("vault_visible", defaults.vault_visible)),
+            vpn_overlay=bool(data.get("vpn_overlay", defaults.vpn_overlay)),
+            vpn_adapter_hint=str(
+                data.get("vpn_adapter_hint", defaults.vpn_adapter_hint)
+            ),
             peek_enabled=bool(data.get("peek_enabled", defaults.peek_enabled)),
             peek_edge=data.get("peek_edge", defaults.peek_edge),
             peek_offset=int(data.get("peek_offset", defaults.peek_offset)),
             ai_provider=data.get("ai_provider", defaults.ai_provider),
+            ai_model=str(data.get("ai_model", defaults.ai_model)),
             ai_api_key=data.get("ai_api_key", defaults.ai_api_key),
             ai_panel_mode=data.get("ai_panel_mode", defaults.ai_panel_mode),
+            ai_panel_side=data.get("ai_panel_side", defaults.ai_panel_side),
+            script_python=str(data.get("script_python", defaults.script_python)),
             secret_trigger=SecretTrigger.from_dict(data.get("secret_trigger", {})),
             global_hotkeys=dict(data.get("global_hotkeys", {})),
             profiles=[

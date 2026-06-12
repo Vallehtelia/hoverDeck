@@ -1,6 +1,7 @@
 """run_script step: run a Python file (or inline code) in a subprocess."""
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -8,6 +9,20 @@ from pathlib import Path
 
 from hoverdeck.core.context import ExecutionContext
 from hoverdeck.core.steps.base import Step, StepError
+
+
+def resolve_interpreter(configured: str | None = None) -> str:
+    """The Python that runs scripts: the configured one, else a sane default.
+
+    When frozen (packaged exe) ``sys.executable`` is HoverDeck.exe — not a
+    Python — so fall back to a ``python`` on PATH. Settings can override this
+    to point at an environment that has the scripts' dependencies installed.
+    """
+    if configured:
+        return configured
+    if getattr(sys, "frozen", False):
+        return shutil.which("python") or shutil.which("python3") or "python"
+    return sys.executable
 
 
 @dataclass
@@ -40,14 +55,28 @@ class RunScriptStep(Step):
                 return candidate
         return script
 
+    @staticmethod
+    def _guard_hidden(ctx: ExecutionContext, script: Path) -> None:
+        """Hidden (vault-only) scripts may run only from a vault action."""
+        if ctx.scripts_dir is None or ctx.allow_hidden_scripts:
+            return
+        hidden = (ctx.scripts_dir / "hidden").resolve()
+        try:
+            script.resolve().relative_to(hidden)
+        except ValueError:
+            return  # not a hidden script
+        raise StepError("This is a vault-only script — add it to a hidden key.")
+
     def execute(self, ctx: ExecutionContext) -> None:
+        interp = resolve_interpreter(ctx.python_exe)
         if self.path:
             script = self._resolve_path(ctx)
             if not script.exists():
                 raise StepError("Script not found — check the path in Edit.")
-            cmd = [sys.executable, str(script), *self.args]
+            self._guard_hidden(ctx, script)
+            cmd = [interp, str(script), *self.args]
         elif self.inline_code:
-            cmd = [sys.executable, "-c", self.inline_code, *self.args]
+            cmd = [interp, "-c", self.inline_code, *self.args]
         else:
             raise StepError("This step has no script — add a path or code in Edit.")
 

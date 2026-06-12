@@ -4,6 +4,7 @@ from __future__ import annotations
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
     QGridLayout,
+    QHBoxLayout,
     QLineEdit,
     QPushButton,
     QVBoxLayout,
@@ -11,6 +12,7 @@ from PyQt6.QtWidgets import (
 )
 
 from hoverdeck.ui import theme
+from hoverdeck.ui.dialogs.file_browser import FileBrowserDialog
 
 # Switchboard-friendly glyphs that render in the bundled/system fonts.
 GLYPHS = [
@@ -42,14 +44,24 @@ class IconPicker(QWidget):
             palette.addWidget(button, i // _PALETTE_COLS, i % _PALETTE_COLS)
         layout.addLayout(palette)
 
+        field_row = QHBoxLayout()
+        field_row.setSpacing(theme.CONTROL_PADDING)
         self._field = QLineEdit(current)
-        self._field.setPlaceholderText("Or type any glyph or emoji")
-        self._field.setMaxLength(4)
+        self._field.setPlaceholderText("A glyph/emoji, or an image path")
         self._field.textChanged.connect(self.icon_changed)
-        layout.addWidget(self._field)
+        image_btn = QPushButton("Image…")
+        image_btn.clicked.connect(self._pick_image)
+        field_row.addWidget(self._field, 1)
+        field_row.addWidget(image_btn)
+        layout.addLayout(field_row)
 
     def _pick(self, glyph: str) -> None:
         self._field.setText(glyph)  # textChanged re-emits icon_changed
+
+    def _pick_image(self) -> None:
+        path = FileBrowserDialog.get_file(self, "", "Pick an image for this key")
+        if path:
+            self._field.setText(path)
 
     def icon(self) -> str:
         return self._field.text().strip()

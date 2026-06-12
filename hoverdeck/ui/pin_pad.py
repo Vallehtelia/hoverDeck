@@ -206,6 +206,12 @@ class PinPad(QWidget):
         self._message_timer.setInterval(theme.WRONG_CODE_HOLD_MS)
         self._message_timer.timeout.connect(lambda: self._message.setText(""))
 
+        # Escalating lockout after repeated wrong codes (driven by the overlay).
+        self._locked = False
+        self._lock_remaining = 0
+        self._lock_timer = QTimer(self)
+        self._lock_timer.timeout.connect(self._on_lock_tick)
+
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.hide()
 
@@ -291,6 +297,30 @@ class PinPad(QWidget):
         self._message_timer.start()
         QTimer.singleShot(theme.PIN_FLASH_MS, lambda: self._dots.set_count(0))
 
+    def lock_for(self, seconds: int) -> None:
+        """Reject the code and block further entry for ``seconds`` (escalating)."""
+        self._pin = ""
+        self._dots.flash("fault")
+        self._dots.shake()
+        QTimer.singleShot(theme.PIN_FLASH_MS, lambda: self._dots.set_count(0))
+        self._locked = True
+        self._lock_remaining = max(1, seconds)
+        self._message_timer.stop()
+        self._update_lock_message()
+        self._lock_timer.start(1000)
+
+    def _update_lock_message(self) -> None:
+        self._message.setText(f"Locked — try again in {self._lock_remaining}s")
+
+    def _on_lock_tick(self) -> None:
+        self._lock_remaining -= 1
+        if self._lock_remaining <= 0:
+            self._lock_timer.stop()
+            self._locked = False
+            self._message.setText("")
+        else:
+            self._update_lock_message()
+
     def accept_unlock(self) -> None:
         """Brief live-green flash, then slide away."""
         self._dots.flash("live")
@@ -298,6 +328,8 @@ class PinPad(QWidget):
 
     # ---------------------------------------------------------------- input
     def _on_key(self, value: str) -> None:
+        if self._locked:
+            return
         if value == _BACK:
             self._pin = self._pin[:-1]
         elif value == _OK:
@@ -316,7 +348,10 @@ class PinPad(QWidget):
         key = event.key()
         if key == Qt.Key.Key_Escape:
             self.close_pad()
-        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            return
+        if self._locked:
+            return  # input is blocked during a lockout
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
             self._submit()
         elif key == Qt.Key.Key_Backspace:
             self._on_key(_BACK)

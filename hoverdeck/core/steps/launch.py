@@ -5,7 +5,7 @@ import os
 import subprocess
 import sys
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from hoverdeck.core.context import ExecutionContext
@@ -17,23 +17,32 @@ MODES = ("auto", "url", "app", "file")
 _APP_EXTENSIONS = {".exe", ".bat", ".cmd", ".ps1", ".py", ".sh"}
 
 
-def _launch_app(target: str) -> None:
+def _launch_app(target: str, args: list[str] | None = None) -> None:
+    args = list(args or [])
     ext = Path(target).suffix.lower()
     if ext == ".ps1":
         subprocess.Popen(  # noqa: S603
-            ["powershell", "-ExecutionPolicy", "Bypass", "-File", target],
+            ["powershell", "-ExecutionPolicy", "Bypass", "-File", target, *args],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
     elif ext == ".py":
         subprocess.Popen(  # noqa: S603
-            [sys.executable, target],
+            [sys.executable, target, *args],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+    elif sys.platform == "win32":
+        # ShellExecute: resolves a bare app name (e.g. "firefox") via the App
+        # Paths registry, passes flags, and is fire-and-forget (no pipes to wait
+        # on, so a long-lived GUI app never hangs the step).
+        os.startfile(  # noqa: S606
+            target,
+            arguments=subprocess.list2cmdline(args) if args else "",
+        )
     else:
         subprocess.Popen(  # noqa: S603
-            [target],
+            [target, *args],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -80,6 +89,7 @@ class LaunchStep(Step):
 
     target: str = ""
     mode: str = "auto"  # auto | url | app | file
+    args: list[str] = field(default_factory=list)  # command-line flags (app mode)
 
     def describe(self) -> str:
         return "Open an app, file, or address"
@@ -107,15 +117,21 @@ class LaunchStep(Step):
             elif mode == "file":
                 _open_file(self.target)
             else:  # app
-                _launch_app(self.target)
+                _launch_app(self.target, self.args)
         except OSError as exc:
             raise StepError(
                 f"Could not open {self.target} — check the path or URL."
             ) from exc
 
     def to_dict(self) -> dict:
-        return {"type": self.TYPE, "target": self.target, "mode": self.mode}
+        return {"type": self.TYPE, "target": self.target, "mode": self.mode,
+                "args": list(self.args)}
 
     @classmethod
     def from_dict(cls, data: dict) -> "LaunchStep":
-        return cls(target=data.get("target", ""), mode=data.get("mode", "auto"))
+        args = data.get("args") or []
+        return cls(
+            target=data.get("target", ""),
+            mode=data.get("mode", "auto"),
+            args=[str(a) for a in args] if isinstance(args, list) else [],
+        )

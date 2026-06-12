@@ -40,12 +40,27 @@ class RunnerCallbacks:
 class ActionRunner:
     """Runs step chains; tracks which actions are in flight."""
 
-    def __init__(self, scripts_dir: Path | None = None, macro_store: object = None) -> None:
+    def __init__(self, scripts_dir: Path | None = None, macro_store: object = None,
+                 python_exe: str | None = None) -> None:
         self._scripts_dir = scripts_dir
         self._macro_store = macro_store
+        self._python_exe = python_exe
         self._running: set[str] = set()
         self._contexts: dict[str, ExecutionContext] = {}
         self._lock = threading.Lock()
+
+    def set_python_exe(self, python_exe: str | None) -> None:
+        """Set the interpreter future runs use for 'Run a script' steps."""
+        self._python_exe = python_exe
+
+    def make_context(self, allow_hidden_scripts: bool = False) -> ExecutionContext:
+        """Build a fresh run context carrying the runner's shared settings."""
+        return ExecutionContext(
+            scripts_dir=self._scripts_dir,
+            macro_store=self._macro_store,
+            python_exe=self._python_exe,
+            allow_hidden_scripts=allow_hidden_scripts,
+        )
 
     def is_running(self, action_id: str) -> bool:
         with self._lock:
@@ -72,9 +87,7 @@ class ActionRunner:
         A second run of a non-repeat action that is still in flight is ignored.
         """
         cb = callbacks or RunnerCallbacks()
-        ctx = ctx or ExecutionContext(
-            scripts_dir=self._scripts_dir, macro_store=self._macro_store
-        )
+        ctx = ctx or self.make_context()
 
         with self._lock:
             if action.id in self._running:

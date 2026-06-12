@@ -58,7 +58,9 @@ class HoverDeckApp:
         self.macro_store = MacroStore(config.MACROS_DIR)
         self.vault_store = VaultStore(config.VAULT_DIR)
         self.runner = ActionRunner(
-            scripts_dir=config.SCRIPTS_DIR, macro_store=self.macro_store
+            scripts_dir=config.SCRIPTS_DIR,
+            macro_store=self.macro_store,
+            python_exe=self.settings.script_python or None,
         )
 
         # Global hotkeys: the keyboard lib fires on its own thread; the queued

@@ -48,14 +48,16 @@ from hoverdeck.security.vault import VaultStore
 from hoverdeck.storage.deck_store import DeckStore
 from hoverdeck.storage.macro_store import MacroStore
 from hoverdeck.storage.settings_store import SettingsStore
-from hoverdeck.ui import theme
+from hoverdeck.ui import screens, theme
 from hoverdeck.ui.ai_builder_panel import AIBuilderPanel
 from hoverdeck.ui.deck_grid import ActionDispatcher, DeckGrid
 from hoverdeck.ui.dialogs.button_editor import ButtonEditor
 from hoverdeck.ui.dialogs.macro_editor import MacroEditor
 from hoverdeck.ui.dialogs.settings_dialog import SettingsDialog
+from hoverdeck.core import vpn
 from hoverdeck.ui.pin_pad import PinPad
 from hoverdeck.ui.widgets.peek_button import PeekButton
+from hoverdeck.ui.widgets.vpn_badge import VpnBadge
 from hoverdeck.utils import win as winutil
 from hoverdeck.utils.hotkeys import HotkeyManager
 from hoverdeck.utils.logging import get_logger
@@ -75,6 +77,7 @@ class DragHandle(QWidget):
 
     secret_held = pyqtSignal()
     tuck_requested = pyqtSignal()
+    drag_finished = pyqtSignal()   # a move drag ended; re-snap to the wall
 
     def __init__(self, window: QWidget, hold_ms: int = 1500,
                  parent: QWidget | None = None) -> None:
@@ -119,9 +122,10 @@ class DragHandle(QWidget):
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         self._hold.stop()
-        if (
-            not self._dragged
-            and not self._held_fired
+        if self._dragged:
+            self.drag_finished.emit()  # re-snap the deck to its wall
+        elif (
+            not self._held_fired
             and event.button() == Qt.MouseButton.LeftButton
             and self._tuck_zone().contains(event.position())
         ):
@@ -186,12 +190,14 @@ class PageDots(QWidget):
     rename_page_requested = pyqtSignal(int, str)
 
     def __init__(self, names: list[str], active: int, vault_unlocked: bool,
-                 edit_mode: bool, parent: QWidget | None = None) -> None:
+                 edit_mode: bool, vault_visible: bool = True,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._names = names
         self._active = active
         self._vault_unlocked = vault_unlocked
         self._edit_mode = edit_mode
+        self._vault_visible = vault_visible
         self._rename_index: int | None = None
         self.setFixedHeight(theme.PAGE_DOT_HIT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -211,7 +217,8 @@ class PageDots(QWidget):
         kinds: list[tuple[str, int]] = [("page", i) for i in range(len(self._names))]
         if self._edit_mode:
             kinds.append(("add", -1))
-        kinds.append(("vault", -1))
+        if self._vault_visible:
+            kinds.append(("vault", -1))
 
         total = len(kinds) * d + (len(kinds) - 1) * gap
         x = self.width() / 2 - total / 2
@@ -389,6 +396,7 @@ class OverlayWindow(QWidget):
         self._vault_deck: Deck | None = None
         self._vault_pin: str | None = None
         self._pin_pad: PinPad | None = None
+        self._pin_attempts = 0  # consecutive wrong PINs → escalating lockout
         self._peek: PeekButton | None = None
         self._tucking = False
         self._panel: AIBuilderPanel | None = None
@@ -402,7 +410,10 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setWindowOpacity(settings.opacity)
 
-        self._dispatcher = ActionDispatcher(runner, self)
+        self._runner = runner
+        self._dispatcher = ActionDispatcher(
+            runner, self, is_vault_action=self._is_vault_action_id
+        )
         self._dispatcher.started.connect(lambda _aid: self._poke_relock())
 
         self._relock_timer = QTimer(self)
@@ -421,8 +432,17 @@ class OverlayWindow(QWidget):
         self._grip.scale_committed.connect(lambda s: self.apply_scale(s, persist=True))
         self._grip.raise_()
 
+        # VPN status overlay (optional): a badge on the deck + a dot on the lamp.
+        self._vpn_state: bool | None = None
+        self._vpn_badge = VpnBadge(self)
+        self._vpn_badge.hide()
+        self._vpn_timer = QTimer(self)
+        self._vpn_timer.setInterval(4000)
+        self._vpn_timer.timeout.connect(self._refresh_vpn)
+
         self._fit()
         self._place_default()
+        self._configure_vpn()
 
     # --------------------------------------------------------- page helpers
     def _vault_index(self) -> int:
@@ -430,6 +450,13 @@ class OverlayWindow(QWidget):
 
     def _is_vault_active(self) -> bool:
         return self._page_index == self._vault_index() and self._vault_deck is not None
+
+    def _is_vault_action_id(self, action_id: str) -> bool:
+        """True if the action belongs to the (unlocked) vault deck.
+
+        Only these may run hidden (vault-only) scripts.
+        """
+        return self._vault_deck is not None and action_id in self._vault_deck.actions
 
     def _current_page(self) -> Page:
         if self._is_vault_active():
@@ -479,6 +506,7 @@ class OverlayWindow(QWidget):
         handle = DragHandle(self, self._settings.secret_trigger.hold_ms, column)
         handle.tuck_requested.connect(self.tuck)
         handle.secret_held.connect(self._open_pin_pad)
+        handle.drag_finished.connect(self._snap_to_wall)
 
         grid = DeckGrid(self._current_page(), self._current_actions(),
                         self._settings, self._dispatcher, column)
@@ -493,6 +521,7 @@ class OverlayWindow(QWidget):
             self._page_index,
             self._vault_deck is not None,
             self._edit_mode,
+            self._settings.vault_visible,
             column,
         )
         dots.page_selected.connect(self._on_user_page_select)
@@ -523,19 +552,103 @@ class OverlayWindow(QWidget):
                 self.height() - self._grip.height() - margin,
             )
             self._grip.raise_()
+        if getattr(self, "_vpn_badge", None) is not None:
+            pad = theme.OVERLAY_PADDING
+            self._vpn_badge.move(
+                pad + theme.SEAM_WIDTH * 2,
+                self.height() - self._vpn_badge.height() - pad,
+            )
+            self._vpn_badge.raise_()
+
+    def _configure_vpn(self) -> None:
+        """Start/stop the VPN poll + show/hide the badge per the setting."""
+        if self._settings.vpn_overlay:
+            if not self._vpn_timer.isActive():
+                self._vpn_timer.start()
+            self._refresh_vpn()
+        else:
+            self._vpn_timer.stop()
+            self._vpn_state = None
+            self._vpn_badge.hide()
+            if self._peek is not None:
+                self._peek.set_vpn(False, None)
+
+    def _refresh_vpn(self) -> None:
+        if not self._settings.vpn_overlay:
+            return
+        state = vpn.vpn_status(self._settings.vpn_adapter_hint)
+        if state != self._vpn_state:
+            log.info("VPN status -> %s: %s", state, vpn.last_detail())
+        self._vpn_state = state
+        self._vpn_badge.set_state(self._vpn_state)
+        self._vpn_badge.show()       # follows the deck; hidden with it when tucked
+        self._position_grip()
+        if self._peek is not None:
+            self._peek.set_vpn(True, self._vpn_state)
 
     def resizeEvent(self, event: object) -> None:
         self._position_grip()
         super().resizeEvent(event)  # type: ignore[arg-type]
 
-    def _place_default(self) -> None:
-        """Park flush against the right wall, near the bottom of the screen."""
+    def _home_pos(self) -> QPoint:
+        """Anchored top-left, floating just off the chosen monitor's right wall.
+
+        A ``gap`` of clear space is left between the painted housing and the
+        wall/floor so the deck doesn't touch the screen edges. The vertical
+        position is the persisted ``dock_y`` (default: near the bottom), so the
+        deck always returns to the same place.
+        """
         area = self._screen_area()
-        pad = theme.OVERLAY_PADDING
-        self.move(
-            area.right() - self.width() + 1 + pad,   # painted housing touches wall
-            area.bottom() - self.height() - pad * 4,
-        )
+        pad = theme.OVERLAY_PADDING       # transparent margin inside the window
+        gap = theme.OVERLAY_PADDING       # clear space between housing and edge
+        x = area.right() - gap - self.width() + pad
+        floor_y = area.bottom() - gap - self.height() + pad
+        if self._settings.dock_y < 0:
+            y = floor_y
+        else:
+            y = area.top() + self._settings.dock_y
+        y = max(area.top(), min(floor_y, y))
+        return QPoint(x, y)
+
+    def _place_default(self) -> None:
+        """Park flush against the right wall at the remembered height."""
+        self.move(self._home_pos())
+
+    def _snap_to_wall(self) -> None:
+        """Re-glue the deck to the right wall after a free drag; keep the height."""
+        area = self._screen_area()
+        y = max(area.top(), min(area.bottom() - self.height() + 1, self.y()))
+        self._settings.dock_y = max(0, y - area.top())
+        self._settings_store.save(self._settings)
+        home = self._home_pos()
+        log.info("snap_to_wall: drag-end (%d,%d) -> home (%d,%d) on %s %s",
+                 self.x(), self.y(), home.x(), home.y(),
+                 self._settings.monitor or "primary", area)
+        self.move(home)
+
+    def redock(self) -> None:
+        """Re-anchor to the (possibly newly chosen) monitor's right wall."""
+        if self._peek is not None:
+            self._peek.set_screen(self._settings.monitor)
+            self._peek.place(self._settings.peek_offset)
+        else:
+            self.move(self._home_pos())
+
+    def _apply_grid_size(self) -> None:
+        """Resize every page to the configured rows×cols.
+
+        Keys in slots beyond the new grid stay in the data (harmless) and
+        reappear if the grid grows again — nothing is destroyed.
+        """
+        rows, cols = self._settings.grid_rows, self._settings.grid_cols
+        for page in self._deck.pages:
+            page.rows, page.cols = rows, cols
+        self._deck_store.save(self._deck)
+        if self._vault_deck is not None:
+            for page in self._vault_deck.pages:
+                page.rows, page.cols = rows, cols
+            if self._vault_pin is not None and self._vault_store is not None:
+                self._vault_store.save(self._vault_pin, self._vault_deck)
 
     # --------------------------------------------------------------- pages
     @property
@@ -608,13 +721,30 @@ class OverlayWindow(QWidget):
         else:
             vault = self._vault_store.load(pin)
         if vault is None:
-            self._pin_pad.reject_wrong_code()
+            self._pin_attempts += 1
+            delay = self._wrong_pin_lock_s(self._pin_attempts)
+            if delay > 0:
+                self._pin_pad.lock_for(delay)
+            else:
+                self._pin_pad.reject_wrong_code()
             return
+        self._pin_attempts = 0
         self._vault_deck = vault
         self._vault_pin = pin
         self._pin_pad.accept_unlock()
         delay = theme.PIN_FLASH_MS + theme.PIN_SLIDE_MS + 20
         QTimer.singleShot(delay, lambda: self.switch_page(self._vault_index()))
+
+    @staticmethod
+    def _wrong_pin_lock_s(attempts: int) -> int:
+        """Lockout seconds after ``attempts`` consecutive wrong PINs.
+
+        First two are free (a typo shouldn't punish); then 5s, 10s, 20s …
+        doubling up to a 5-minute cap, to choke off brute-force attempts.
+        """
+        if attempts < 3:
+            return 0
+        return min(5 * (2 ** (attempts - 3)), 300)
 
     def relock(self) -> None:
         """Drop the vault from memory; nothing on screen mentions it."""
@@ -659,7 +789,10 @@ class OverlayWindow(QWidget):
         action = actions.get(page.slots.get(slot, ""))
         deck_for_editor = self._vault_deck if self._is_vault_active() else self._deck
         assert deck_for_editor is not None
-        editor = ButtonEditor(deck_for_editor, action, self._macro_list(), self)
+        editor = ButtonEditor(
+            deck_for_editor, action, self._macro_list(), self,
+            allow_hidden_scripts=self._is_vault_active(),
+        )
         if editor.exec() == QDialog.DialogCode.Accepted:
             result = editor.result_action()
             actions[result.id] = result
@@ -690,6 +823,21 @@ class OverlayWindow(QWidget):
     def open_macros(self) -> None:
         MacroEditor(self._macro_store, self).exec()
 
+    def open_scripts(self) -> None:
+        from hoverdeck import config
+        from hoverdeck.ui.dialogs.script_manager import ScriptManager
+        ScriptManager(
+            config.SCRIPTS_DIR, self._settings.script_python,
+            vault_unlocked=self._vault_deck is not None, parent=self,
+        ).exec()
+
+    def _set_vault_visible(self, visible: bool) -> None:
+        """Toggle the vault page dot (vault-only setting; secret entry stays)."""
+        self._settings.vault_visible = visible
+        self._settings_store.save(self._settings)
+        self._build_column()
+        self._fit()
+
     # ------------------------------------------------------------- hotkeys
     def run_action_by_id(self, action_id: str) -> None:
         """Dispatch an action fired from a global hotkey (queued to UI thread)."""
@@ -715,6 +863,7 @@ class OverlayWindow(QWidget):
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             dialog.apply_to(self._settings)
+            self._apply_grid_size()  # resize pages before the rebuild below
             self.apply_scale(self._settings.scale, persist=False)
             self._settings_store.save(self._settings)
             if self._panel is not None:
@@ -722,6 +871,9 @@ class OverlayWindow(QWidget):
             if self._hotkeys is not None:
                 self._hotkeys.apply(self._settings.global_hotkeys)
             winutil.set_autostart(self._settings.autostart)
+            self._runner.set_python_exe(self._settings.script_python or None)
+            self._configure_vpn()  # VPN overlay may have been toggled
+            self.redock()  # monitor may have changed — re-glue to the right wall
         else:
             self.apply_scale(original_scale, persist=False)
 
@@ -744,13 +896,29 @@ class OverlayWindow(QWidget):
             self._close_ai_builder()
             return
         if self._panel is None:
-            self._panel = AIBuilderPanel(self._settings)
+            from hoverdeck import config
+            self._panel = AIBuilderPanel(
+                self._settings,
+                scripts_dir=config.SCRIPTS_DIR,
+                vault_unlocked=lambda: self._vault_deck is not None,
+            )
             self._panel.action_ready.connect(self._add_action_from_ai)
             self._panel.closed.connect(self._close_ai_builder)
         page = self._current_page()
-        self._panel.begin_session(
-            [name for _, name in self._macro_list()], page.rows * page.cols
+        from hoverdeck import config as _config
+        from hoverdeck.core.script_catalog import catalog
+        scripts = catalog(
+            _config.SCRIPTS_DIR, include_hidden=self._vault_deck is not None
         )
+        self._panel.begin_session(
+            [name for _, name in self._macro_list()],
+            page.rows * page.cols,
+            free_slots=[
+                i for i in range(page.rows * page.cols) if not page.slots.get(i)
+            ],
+            scripts=scripts,
+        )
+        side = self._panel_side()
         if self._settings.ai_panel_mode == "floating":
             self._panel.setParent(None)
             self._panel.setWindowFlags(
@@ -763,16 +931,40 @@ class OverlayWindow(QWidget):
             self._panel.layout().setContentsMargins(pad, pad, pad, pad)
             self._panel.setFixedWidth(theme.AI_PANEL_WIDTH + pad * 2)
             self._panel.resize(self._panel.width(), self.height())
-            self._panel.move(self.x() - self._panel.width() - pad, self.y())
+            if side == "right":
+                x = self.x() + self.width() + pad
+            else:
+                x = self.x() - self._panel.width() - pad
+            area = self._screen_area()
+            x = max(area.left(), min(x, area.right() - self._panel.width() + 1))
+            self._panel.move(x, self.y())
             self._panel.show()
         else:
             self._panel.setParent(self)
             self._panel.setWindowFlags(Qt.WindowType.Widget)
             self._panel.layout().setContentsMargins(0, 0, 0, 0)
             self._panel.setFixedWidth(theme.AI_PANEL_WIDTH)
-            self._root.addWidget(self._panel)
+            if side == "right":
+                self._root.addWidget(self._panel)
+            else:
+                self._root.insertWidget(0, self._panel)
             self._panel.show()
             self._fit()
+            self.redock()  # widened housing: keep it glued inside the wall
+
+    def _panel_side(self) -> str:
+        """Where the AI panel opens, relative to the deck.
+
+        "auto" picks the side with room: a deck on the right half of the
+        screen opens the panel to the LEFT (never past the wall / onto the
+        next monitor), and vice versa.
+        """
+        side = self._settings.ai_panel_side
+        if side in ("left", "right"):
+            return side
+        area = self._screen_area()
+        on_right_half = self.frameGeometry().center().x() >= area.center().x()
+        return "left" if on_right_half else "right"
 
     def _close_ai_builder(self) -> None:
         if self._panel is None:
@@ -781,13 +973,25 @@ class OverlayWindow(QWidget):
             self._root.removeWidget(self._panel)
         self._panel.hide()
         self._fit()
+        self.redock()  # housing narrowed again — back flush to the wall
 
-    def _add_action_from_ai(self, action: Action) -> None:
+    def _add_action_from_ai(self, payload: object) -> None:
+        # payload: (Action, slot|None) — slot is the user's requested position.
+        if isinstance(payload, tuple):
+            action, wanted = payload
+        else:                       # plain Action (older callers)
+            action, wanted = payload, None
         page = self._current_page()
         actions = self._current_actions()
-        empty = next(
-            (i for i in range(page.rows * page.cols) if not page.slots.get(i)), None
-        )
+        slot_count = page.rows * page.cols
+        empty = None
+        if isinstance(wanted, int) and 0 <= wanted < slot_count \
+                and not page.slots.get(wanted):
+            empty = wanted
+        else:
+            empty = next(
+                (i for i in range(slot_count) if not page.slots.get(i)), None
+            )
         if empty is None:
             if self._panel is not None:
                 self._panel.show_error(NO_EMPTY_SLOT_COPY)
@@ -801,46 +1005,26 @@ class OverlayWindow(QWidget):
 
     # ---------------------------------------------------------------- peek
     def _screen_area(self) -> QRect:
-        screen = QApplication.primaryScreen()
-        assert screen is not None  # a deck with no screen has bigger problems
-        return screen.availableGeometry()
-
-    def _nearest_edge(self) -> str:
-        """Closest edge to the overlay's CURRENT position (BUG 2)."""
-        area = self._screen_area()
-        center = self.frameGeometry().center()
-        distances = {
-            "left": center.x() - area.left(),
-            "right": area.right() - center.x(),
-            "top": center.y() - area.top(),
-            "bottom": area.bottom() - center.y(),
-        }
-        return min(distances, key=distances.get)  # type: ignore[arg-type]
-
-    def _offscreen_pos(self, edge: str, along: QPoint) -> QPoint:
-        """A position just beyond ``edge``, keeping the along-edge coordinate."""
-        area = self._screen_area()
-        if edge == "right":
-            return QPoint(area.right() + theme.SEAM_WIDTH, along.y())
-        if edge == "left":
-            return QPoint(area.left() - self.width() - theme.SEAM_WIDTH, along.y())
-        if edge == "top":
-            return QPoint(along.x(), area.top() - self.height() - theme.SEAM_WIDTH)
-        return QPoint(along.x(), area.bottom() + theme.SEAM_WIDTH)
+        """Available geometry of the user-chosen monitor (primary by default)."""
+        return screens.screen_area(self._settings.monitor)
 
     def tuck(self, edge: str | None = None) -> None:
-        """Hide the deck behind a peek lamp on the nearest screen edge.
+        """Hide the deck behind a peek lamp on the chosen monitor's right wall.
 
-        The edge and the along-edge position are computed from the overlay's
-        geometry BEFORE it hides; the lamp is placed only after the overlay is
-        hidden so its own frame can't interfere (BUG 1 + 2).
+        Tucking always docks to the right wall so the deck and its lamp stay
+        glued there (never jumping across monitors). The deck's height is
+        remembered as ``dock_y`` so untuck restores it exactly; the lamp is
+        placed only AFTER the overlay hides so its own frame can't interfere.
         """
         if self._peek is not None or self._tucking:
             return
         self._tucking = True
         area = self._screen_area()
-        edge = edge or self._nearest_edge()
+        edge = edge or "right"
         center = self.frameGeometry().center()
+
+        # Remember where the deck sat so we can put it back unchanged.
+        self._settings.dock_y = max(0, self.y() - area.top())
 
         # Peek lamp centered on the overlay's position along the edge axis.
         if edge in ("left", "right"):
@@ -853,26 +1037,35 @@ class OverlayWindow(QWidget):
         self._settings.peek_offset = max(0, offset)
         self._settings_store.save(self._settings)
 
+        log.info("tuck: edge=%s area=%s deck@(%d,%d) -> dock_y=%d peek_offset=%d "
+                 "reduce_motion=%s", edge, area, self.x(), self.y(),
+                 self._settings.dock_y, self._settings.peek_offset,
+                 self._settings.reduce_motion)
+
         def finish() -> None:
-            self.hide()  # hide FIRST, then place the lamp (BUG 1)
+            self.hide()  # hide FIRST, then place the lamp
+            self.setWindowOpacity(self._settings.opacity)  # reset for the next show
             self._show_peek(edge, self._settings.peek_offset)
+            log.info("tuck.finish: deck visible=%s peek@(%d,%d)", self.isVisible(),
+                     self._peek.x() if self._peek else -1,
+                     self._peek.y() if self._peek else -1)
             self._tucking = False
 
         if self._settings.reduce_motion:
             finish()
         else:
-            self._animate_to(self._offscreen_pos(edge, self.pos()), finish)
+            # Fade out in place — never slides onto a neighbouring monitor.
+            self._fade(self._settings.opacity, 0.0, finish)
 
     def untuck(self) -> None:
-        """Bring the deck back, adjacent to the peek lamp (BUG 3).
+        """Bring the deck back to its home spot on the chosen monitor's wall.
 
-        The target is recomputed every time from edge + along-edge position —
-        never from stale pre-hide geometry.
+        The target is the persisted right-wall home position, recomputed every
+        time — never stale pre-hide geometry — so open/close is repeatable.
         """
         if self._peek is None:
             return
         edge = self._settings.peek_edge
-        lamp_center = self._peek.frameGeometry().center()
         self._settings.peek_offset = self._peek.offset()
         self._peek.close()
         self._peek.deleteLater()
@@ -880,63 +1073,58 @@ class OverlayWindow(QWidget):
         self._settings.peek_enabled = False
         self._settings_store.save(self._settings)
 
-        target = self._untuck_pos(edge, lamp_center)
+        target = self._home_pos()
+        log.info("untuck: edge=%s -> home (%d,%d) reduce_motion=%s",
+                 edge, target.x(), target.y(), self._settings.reduce_motion)
         if self._settings.reduce_motion:
             self.move(target)
+            self.setWindowOpacity(self._settings.opacity)
             self.show()
             self.raise_()
             return
-        self.move(self._offscreen_pos(edge, target))
+        # Appear at home and fade in — no positional travel across monitors.
+        self.move(target)
+        self.setWindowOpacity(0.0)
         self.show()
         self.raise_()
-        self._animate_to(target, None)
-
-    def _untuck_pos(self, edge: str, lamp_center: QPoint) -> QPoint:
-        """Painted housing flush with ``edge``, centered on the lamp.
-
-        The widget is pushed OVERLAY_PADDING beyond the screen edge so the
-        painted (inset) housing sits exactly on the wall.  The transparent
-        margin that extends off-screen is simply clipped by the compositor.
-        """
-        area = self._screen_area()
-        pad = theme.OVERLAY_PADDING
-        x_along = max(area.left(),
-                      min(area.right() - self.width() + 1,
-                          lamp_center.x() - self.width() // 2))
-        y_along = max(area.top(),
-                      min(area.bottom() - self.height() + 1,
-                          lamp_center.y() - self.height() // 2))
-        if edge == "right":
-            return QPoint(area.right() - self.width() + 1 + pad, y_along)
-        if edge == "left":
-            return QPoint(area.left() - pad, y_along)
-        if edge == "top":
-            return QPoint(x_along, area.top() - pad)
-        return QPoint(x_along, area.bottom() - self.height() + 1 + pad)
+        self._fade(0.0, self._settings.opacity, None)
 
     def _show_peek(self, edge: str, offset: int) -> None:
-        self._peek = PeekButton(edge)
+        self._peek = PeekButton(edge, self._settings.monitor)
         self._peek.invoked.connect(self.untuck)
         self._peek.edge_moved.connect(self._on_peek_moved)
+        self._peek.quit_requested.connect(self._quit)
+        self._peek.set_vpn(self._settings.vpn_overlay, self._vpn_state)
         self._peek.place(offset)   # pre-position so no flash at (0,0)
         self._peek.show()
         self._peek.place(offset)   # re-enforce after show; some WMs reposition on map
 
     def _on_peek_moved(self, offset: int) -> None:
         self._settings.peek_offset = offset
+        # Keep the deck's docked height aligned with the lamp it returns to.
+        if self._settings.peek_edge in ("left", "right"):
+            self._settings.dock_y = max(
+                0, offset + theme.PEEK_RADIUS - self.height() // 2
+            )
         self._settings_store.save(self._settings)
 
-    def _animate_to(self, target: QPoint, on_finish: object) -> None:
-        self._slide = QPropertyAnimation(self, b"pos", self)
+    def _fade(self, start: float, end: float, on_finish: object) -> None:
+        """Animate window opacity in place (no movement → no monitor-hopping)."""
+        self.setWindowOpacity(start)
+        self._slide = QPropertyAnimation(self, b"windowOpacity", self)
         self._slide.setDuration(theme.PEEK_SLIDE_MS)
-        self._slide.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self._slide.setEndValue(target)
+        self._slide.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        self._slide.setStartValue(start)
+        self._slide.setEndValue(end)
         if callable(on_finish):
             self._slide.finished.connect(on_finish)
         self._slide.start()
 
     def show_or_peek(self) -> None:
         """Startup entry: restore peek mode if the deck was left tucked."""
+        log.info("show_or_peek: peek_enabled=%s monitor=%s area=%s deck_pos=(%d,%d)",
+                 self._settings.peek_enabled, self._settings.monitor or "primary",
+                 self._screen_area(), self.x(), self.y())
         if self._settings.peek_enabled:
             self._show_peek(self._settings.peek_edge, self._settings.peek_offset)
         else:
@@ -957,10 +1145,30 @@ class OverlayWindow(QWidget):
         edit.toggled.connect(self.set_edit_mode)
         menu.addAction("AI Builder", self.toggle_ai_builder)
         menu.addAction("Macros…", self.open_macros)
+        menu.addAction("Scripts…", self.open_scripts)
+        # Vault-only: shows only while unlocked, so a bystander never sees it.
+        if self._vault_deck is not None:
+            dot = menu.addAction("Show vault dot")
+            dot.setCheckable(True)
+            dot.setChecked(self._settings.vault_visible)
+            dot.toggled.connect(self._set_vault_visible)
+            menu.addAction("Lock vault now", self.relock)
         menu.addSeparator()
         menu.addAction("Pin to edge", lambda: self.tuck(None))
         menu.addAction("Settings…", self.open_settings)
+        menu.addSeparator()
+        menu.addAction("Quit HoverDeck", self._quit)
         menu.exec(event.globalPos())
+
+    def _quit(self) -> None:
+        """Clean shutdown — relock the vault, then drop the app."""
+        self.relock()
+        if self._peek is not None:
+            self._peek.close()
+        log.info("Quit requested from the overlay menu.")
+        app = QApplication.instance()
+        if app is not None:
+            app.quit()
 
     # ------------------------------------------------------------ painting
     def paintEvent(self, event: QPaintEvent) -> None:

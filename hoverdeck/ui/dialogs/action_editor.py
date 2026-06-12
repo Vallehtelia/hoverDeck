@@ -9,21 +9,27 @@ from __future__ import annotations
 from PyQt6.QtCore import QPoint, Qt, QTime, QTimer, pyqtSignal
 from PyQt6.QtGui import QCursor
 from PyQt6.QtWidgets import (
-    QComboBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMenu,
+    QMessageBox,
     QPushButton,
     QScrollArea,
-    QSpinBox,
     QStackedWidget,
-    QTimeEdit,
     QToolButton,
     QVBoxLayout,
     QWidget,
+)
+
+# Wheel-ignoring inputs: scrolling the step list never changes a step's type
+# or a spin value by accident (only click/dropdown/keyboard do).
+from hoverdeck.ui.widgets.no_scroll import (
+    NoScrollComboBox as QComboBox,
+    NoScrollSpinBox as QSpinBox,
+    NoScrollTimeEdit as QTimeEdit,
 )
 
 from hoverdeck.core.conditions import (
@@ -69,6 +75,9 @@ COND_CHOICES: list[tuple[str, str]] = [
 ]
 
 _PICK_PIXEL_DELAY_MS = 2000
+
+# Auto-inserted gap between consecutive steps (editable in the list afterward).
+_AUTO_GAP_MS = 300
 
 
 def _mono_edit(placeholder: str) -> QLineEdit:
@@ -265,24 +274,36 @@ class StepRow(QWidget):
     move_me = pyqtSignal(object, int)  # widget, direction (-1 up / +1 down)
 
     def __init__(self, step: Step, macros: list[tuple[str, str]],
+                 allow_hidden_scripts: bool = False,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._macros = macros  # (macro_id, name)
+        self._allow_hidden = allow_hidden_scripts
         self._then: list[Step] = []
         self._else: list[Step] = []
 
-        row = QHBoxLayout(self)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(theme.CONTROL_PADDING)
+        # A row is a small card: a header (type + reorder/delete) with the
+        # type-specific fields on their own full-width line beneath it — so
+        # nothing (e.g. a Browse button) gets pushed off the right edge.
+        self.setObjectName("StepRow")
+        self.setStyleSheet(
+            f"#StepRow {{ background: {theme.KEYCAP}; "
+            f"border: {theme.SEAM_WIDTH}px solid {theme.SEAM}; "
+            f"border-radius: {theme.CONTROL_RADIUS}px; }}"
+        )
 
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(*([theme.CONTROL_PADDING] * 4))
+        outer.setSpacing(theme.CONTROL_PADDING)
+
+        header = QHBoxLayout()
+        header.setSpacing(theme.CONTROL_PADDING)
         self._type = QComboBox()
         for step_type, label in STEP_CHOICES:
             self._type.addItem(label, step_type)
-        row.addWidget(self._type)
-
-        self._stack = QStackedWidget()
-        row.addWidget(self._stack, 1)
-        self._build_forms(step)
+        self._type.setMinimumWidth(theme.AI_PANEL_WIDTH // 2)
+        header.addWidget(self._type)
+        header.addStretch(1)
 
         up = QToolButton()
         up.setText("↑")
@@ -294,7 +315,12 @@ class StepRow(QWidget):
         remove.setText("✕")
         remove.clicked.connect(lambda: self.remove_me.emit(self))
         for tool_button in (up, down, remove):
-            row.addWidget(tool_button)
+            header.addWidget(tool_button)
+        outer.addLayout(header)
+
+        self._stack = QStackedWidget()
+        self._build_forms(step)
+        outer.addWidget(self._stack)
 
         self._type.currentIndexChanged.connect(self._stack.setCurrentIndex)
         self._type.currentIndexChanged.connect(self.changed)
@@ -376,13 +402,15 @@ class StepRow(QWidget):
         layout = QHBoxLayout(launch)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.CONTROL_PADDING)
-        self._launch_target = _mono_edit("App path or URL")
+        self._launch_target = _mono_edit("App name/path or URL")
+        self._launch_args = _mono_edit("Flags (e.g. -private-window)")
         self._launch_mode = QComboBox()
         for mode in ("auto", "url", "app", "file"):
             self._launch_mode.addItem(mode)
         app_browse = QPushButton("Browse…")
         app_browse.clicked.connect(self._browse_app)
-        layout.addWidget(self._launch_target, 1)
+        layout.addWidget(self._launch_target, 2)
+        layout.addWidget(self._launch_args, 1)
         layout.addWidget(self._launch_mode)
         layout.addWidget(app_browse)
         self._stack.addWidget(launch)
@@ -404,8 +432,29 @@ class StepRow(QWidget):
         self._stack.addWidget(cond_w)
 
     def _browse_script(self) -> None:
-        path = FileBrowserDialog.get_file(self, "", "Pick a script")
-        if path:
+        from hoverdeck import config
+        from pathlib import Path as _Path
+        # Vault keys browse the hidden folder; normal keys the base folder.
+        hidden_dir = (config.SCRIPTS_DIR / "hidden").resolve()
+        start = hidden_dir if self._allow_hidden else config.SCRIPTS_DIR
+        path = FileBrowserDialog.get_file(self, str(start), "Pick a script")
+        if not path:
+            return
+        resolved = _Path(path).resolve()
+        in_hidden = resolved == hidden_dir or hidden_dir in resolved.parents
+        if in_hidden and not self._allow_hidden:
+            # Vault-only scripts can't be attached to a normal (non-vault) key.
+            QMessageBox.warning(
+                self, "Scripts",
+                "That's a vault-only script — add it to a hidden (vault) key.",
+            )
+            return
+        try:
+            # A script under the scripts dir is stored by relative name so it
+            # stays valid across dev/packaged (RunScriptStep resolves it there).
+            rel = resolved.relative_to(config.SCRIPTS_DIR.resolve())
+            self._script_path.setText(str(rel))
+        except ValueError:
             self._script_path.setText(path)
 
     def _browse_cwd(self) -> None:
@@ -425,7 +474,9 @@ class StepRow(QWidget):
     def _edit_branch(self, branch: str) -> None:
         steps = self._then if branch == "then" else self._else
         title = "Steps when it matches" if branch == "then" else "Steps when it doesn't"
-        dialog = StepChainDialog(list(steps), self._macros, title, self)
+        dialog = StepChainDialog(
+            list(steps), self._macros, title, self._allow_hidden, self
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             if branch == "then":
                 self._then = dialog.steps()
@@ -458,6 +509,7 @@ class StepRow(QWidget):
             self._shell_timeout.setValue(step.timeout_ms)
         elif isinstance(step, LaunchStep):
             self._launch_target.setText(step.target)
+            self._launch_args.setText(" ".join(step.args))
             self._launch_mode.setCurrentText(step.mode)
         elif isinstance(step, ConditionStep):
             self._then = list(step.then)
@@ -487,6 +539,7 @@ class StepRow(QWidget):
             return LaunchStep(
                 target=self._launch_target.text().strip(),
                 mode=self._launch_mode.currentText(),
+                args=self._launch_args.text().split(),
             )
         return ConditionStep(
             cond=self._cond_form.condition(),
@@ -499,9 +552,11 @@ class StepChainEditor(QWidget):
     """The reusable step list: scrollable rows + 'Add a step'."""
 
     def __init__(self, steps: list[Step], macros: list[tuple[str, str]],
+                 allow_hidden_scripts: bool = False,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._macros = macros
+        self._allow_hidden = allow_hidden_scripts
         self._rows: list[StepRow] = []
 
         layout = QVBoxLayout(self)
@@ -513,15 +568,15 @@ class StepChainEditor(QWidget):
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._empty)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
         host = QWidget()
         self._list = QVBoxLayout(host)
         self._list.setContentsMargins(0, 0, 0, 0)
         self._list.setSpacing(theme.CONTROL_PADDING)
         self._list.addStretch(1)
-        scroll.setWidget(host)
-        layout.addWidget(scroll, 1)
+        self._scroll.setWidget(host)
+        layout.addWidget(self._scroll, 1)
 
         add = QPushButton("Add a step")
         add.clicked.connect(self._show_add_menu)
@@ -548,15 +603,26 @@ class StepChainEditor(QWidget):
             "launch": LaunchStep(),
             "condition": ConditionStep(cond=WindowTitleCondition()),
         }
-        self._append_row(defaults[step_type])
+        # Auto-insert an adjustable wait between consecutive steps (unless the
+        # previous step is already a wait, or this new step is itself a wait).
+        if (
+            self._rows
+            and step_type != "delay"
+            and not isinstance(self._rows[-1].to_step(), DelayStep)
+        ):
+            self._append_row(DelayStep(ms=_AUTO_GAP_MS))
+        row = self._append_row(defaults[step_type])
         self._refresh_empty()
+        # Bring the freshly added row into view so you don't have to hunt for it.
+        QTimer.singleShot(0, lambda: self._scroll.ensureWidgetVisible(row))
 
-    def _append_row(self, step: Step) -> None:
-        row = StepRow(step, self._macros)
+    def _append_row(self, step: Step) -> StepRow:
+        row = StepRow(step, self._macros, self._allow_hidden)
         row.remove_me.connect(self._remove_row)
         row.move_me.connect(self._move_row)
         self._rows.append(row)
         self._list.insertWidget(self._list.count() - 1, row)
+        return row
 
     def _remove_row(self, row: StepRow) -> None:
         if row in self._rows:
@@ -585,13 +651,14 @@ class StepChainDialog(QDialog):
     """A nested chain (condition then/else branches)."""
 
     def __init__(self, steps: list[Step], macros: list[tuple[str, str]],
-                 title: str, parent: QWidget | None = None) -> None:
+                 title: str, allow_hidden_scripts: bool = False,
+                 parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self.setMinimumWidth(theme.AI_PANEL_WIDTH * 2)
         layout = QVBoxLayout(self)
         layout.setSpacing(theme.CONTROL_PADDING * 2)
-        self._editor = StepChainEditor(steps, macros, self)
+        self._editor = StepChainEditor(steps, macros, allow_hidden_scripts, self)
         layout.addWidget(self._editor, 1)
         layout.addLayout(_save_cancel_row(self))
 
@@ -603,9 +670,11 @@ class ActionEditor(QDialog):
     """Edit one Action: its name and its step chain."""
 
     def __init__(self, action: Action, macros: list[tuple[str, str]],
+                 allow_hidden_scripts: bool = False,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._action = action
+        self._allow_hidden = allow_hidden_scripts
         self.setWindowTitle("Edit the action")
         # Wide enough that a pixel-color condition row breathes.
         self.setMinimumWidth(theme.AI_PANEL_WIDTH * 2 + theme.BUTTON_SIZE_DEFAULT * 2)
@@ -619,7 +688,9 @@ class ActionEditor(QDialog):
         name_row.addWidget(self._name, 1)
         layout.addLayout(name_row)
 
-        self._editor = StepChainEditor(list(action.steps), macros, self)
+        self._editor = StepChainEditor(
+            list(action.steps), macros, self._allow_hidden, self
+        )
         layout.addWidget(self._editor, 1)
         layout.addLayout(_save_cancel_row(self))
 

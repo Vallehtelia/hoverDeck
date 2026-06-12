@@ -36,11 +36,12 @@ class ActionThread(QThread):
     """Runs one action's step chain off the UI thread."""
 
     def __init__(self, runner: ActionRunner, action: Action,
-                 dispatcher: "ActionDispatcher") -> None:
+                 dispatcher: "ActionDispatcher", ctx: object = None) -> None:
         super().__init__(dispatcher)
         self._runner = runner
         self._action = action
         self._dispatcher = dispatcher
+        self._ctx = ctx
 
     def run(self) -> None:
         self._runner.run(
@@ -52,6 +53,7 @@ class ActionThread(QThread):
                 on_cancelled=self._dispatcher.cancelled.emit,
                 on_error=self._dispatcher.error.emit,
             ),
+            ctx=self._ctx,  # type: ignore[arg-type]
         )
 
 
@@ -64,17 +66,22 @@ class ActionDispatcher(QObject):
     cancelled = pyqtSignal(str)            # action_id — repeat loop stopped by user
     error = pyqtSignal(str, int, str)      # action_id, step index, message
 
-    def __init__(self, runner: ActionRunner, parent: QObject | None = None) -> None:
+    def __init__(self, runner: ActionRunner, parent: QObject | None = None,
+                 is_vault_action: object = None) -> None:
         super().__init__(parent)
         self._runner = runner
         self._threads: list[ActionThread] = []
+        # Callback(action_id) -> bool: is this a vault action (may use hidden scripts)?
+        self._is_vault_action = is_vault_action
 
     def run(self, action: Action) -> None:
         if self._runner.is_running(action.id):
             if action.repeat:
                 self._runner.cancel(action.id)  # second press stops the loop
             return
-        thread = ActionThread(self._runner, action, self)
+        allow_hidden = bool(self._is_vault_action and self._is_vault_action(action.id))
+        ctx = self._runner.make_context(allow_hidden_scripts=allow_hidden)
+        thread = ActionThread(self._runner, action, self, ctx)
         thread.finished.connect(lambda t=thread: self._reap(t))
         self._threads.append(thread)
         thread.start()

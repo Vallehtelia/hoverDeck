@@ -9,7 +9,6 @@ import uuid
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -18,6 +17,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from hoverdeck.ui.widgets.no_scroll import NoScrollComboBox as QComboBox
 
 from hoverdeck.core.models import Action, Deck
 from hoverdeck.ui import theme
@@ -37,10 +38,12 @@ class ButtonEditor(QDialog):
         action: Action | None,
         macros: list[tuple[str, str]],
         parent: QWidget | None = None,
+        allow_hidden_scripts: bool = False,
     ) -> None:
         super().__init__(parent)
         self._deck = deck
         self._macros = macros
+        self._allow_hidden = allow_hidden_scripts
         self._action = action or Action(
             id=uuid.uuid4().hex[:8], name="New key", icon="", color="", steps=[]
         )
@@ -148,7 +151,7 @@ class ButtonEditor(QDialog):
     def _edit_steps(self) -> None:
         # Keep the typed name when hopping into the step editor.
         self._action.name = self._name.text().strip() or self._action.name
-        editor = ActionEditor(self._action, self._macros, self)
+        editor = ActionEditor(self._action, self._macros, self._allow_hidden, self)
         if editor.exec() == QDialog.DialogCode.Accepted:
             self._action = editor.result_action()
             self._name.setText(self._action.name)

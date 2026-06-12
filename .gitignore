@@ -1,7 +1,12 @@
 # Runtime data (decks, macros, vault, settings, logs)
 data/
+*.log
 
-# Your private scripts
+# Secrets — settings.json holds the AI API key. The real one lives in data/ or
+# %APPDATA% (both untracked); this guards against stray copies elsewhere.
+settings.json
+
+# Your private scripts (incl. the hidden/ vault scripts)
 scripts/*
 !scripts/.gitkeep
 
@@ -12,18 +17,27 @@ scripts/*
 __pycache__/
 *.py[cod]
 *.egg-info/
+*.egg
 .venv/
 venv/
+winvenv/
 .pytest_cache/
 .coverage
+htmlcov/
+coverage.xml
+.mypy_cache/
+.ruff_cache/
 
-# Packaging
+# Packaging / build output (PyInstaller + Inno Setup)
 build/
+build_tmp/
 dist/
 *.spec
 
 # Editors / OS
 .idea/
 .vscode/
+*.swp
 Thumbs.db
+desktop.ini
 .DS_Store

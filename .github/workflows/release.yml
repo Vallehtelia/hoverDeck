@@ -1,0 +1,59 @@
+name: Release
+
+# Build the Windows installer + portable exe and attach them to a GitHub
+# Release whenever a version tag is pushed, e.g.:
+#   git tag v0.1.0 && git push origin v0.1.0
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:        # allow a manual run for testing
+
+permissions:
+  contents: write           # needed to create the Release
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-windows.txt pyinstaller
+
+      - name: Derive version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $v = "$env:GITHUB_REF_NAME" -replace '^v', ''
+          if (-not $v -or $v -eq "$env:GITHUB_REF_NAME") { $v = "0.0.0" }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build (portable exe + one-dir)
+        run: |
+          python build.py
+          python build.py onedir
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            /DMyAppVersion=${{ steps.ver.outputs.version }} `
+            installer\hoverdeck.iss
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: HoverDeck ${{ steps.ver.outputs.version }}
+          generate_release_notes: true
+          files: |
+            dist/HoverDeck-Setup-*.exe
+            dist/HoverDeck.exe

@@ -58,6 +58,10 @@ class Tray(QSystemTrayIcon):
         macros_action.triggered.connect(overlay.open_macros)
         menu.addAction(macros_action)
 
+        scripts_action = QAction("Scripts…", menu)
+        scripts_action.triggered.connect(overlay.open_scripts)
+        menu.addAction(scripts_action)
+
         menu.addSeparator()
         pin_action = QAction("Pin to edge", menu)
         pin_action.triggered.connect(lambda: overlay.tuck(None))

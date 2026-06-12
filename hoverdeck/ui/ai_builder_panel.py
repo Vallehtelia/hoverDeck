@@ -8,6 +8,9 @@ has produced a valid action.
 from __future__ import annotations
 
 import asyncio
+import re
+from pathlib import Path
+from typing import Callable
 
 from PyQt6.QtCore import QEasingCurve, QRectF, Qt, QThread, QTimer, QVariantAnimation, pyqtSignal
 from PyQt6.QtGui import QKeyEvent, QPainter, QPaintEvent, QPen
@@ -33,6 +36,7 @@ from hoverdeck.core.ai_builder import (
 )
 from hoverdeck.core.models import Action, Settings
 from hoverdeck.ui import theme
+from hoverdeck.ui.dialogs.script_review import ScriptReviewDialog
 from hoverdeck.utils.logging import get_logger
 
 log = get_logger("ai_panel")
@@ -184,16 +188,31 @@ class AIBuilderPanel(QWidget):
     action_ready = pyqtSignal(object)  # Action confirmed by the user
     closed = pyqtSignal()
 
-    def __init__(self, settings: Settings, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        parent: QWidget | None = None,
+        scripts_dir: Path | None = None,
+        vault_unlocked: Callable[[], bool] | None = None,
+    ) -> None:
         super().__init__(parent)
         self._settings = settings
-        self._builder = AIBuilder(settings.ai_provider, settings.ai_api_key)
+        self._scripts_dir = scripts_dir
+        self._vault_unlocked = vault_unlocked or (lambda: False)
+        self._builder = AIBuilder(
+            settings.ai_provider, settings.ai_api_key, settings.ai_model
+        )
         self._context = BuilderContext()
         self._worker: _SendWorker | None = None
         self._stream_bubble: ChatBubble | None = None
         self._stream_text = ""
         self._typing: TypingIndicator | None = None
         self._pending_action: Action | None = None
+        self._pending_slot: int | None = None  # user-targeted slot, if any
+        self._pending_script = None          # ScriptProposal awaiting review
+        self._suggestion_host: QWidget | None = None
+        self._auto_replies = 0               # consecutive tool auto-answers (runaway guard)
+        self._followup_request: str | None = None  # tool reply to send once idle
 
         self.setFixedWidth(theme.AI_PANEL_WIDTH)
         layout = QVBoxLayout(self)
@@ -246,6 +265,14 @@ class AIBuilderPanel(QWidget):
         input_row.addWidget(self._send_btn, 0, Qt.AlignmentFlag.AlignBottom)
         layout.addLayout(input_row)
 
+        # Review lamp: the agent wrote a script; nothing saves until reviewed.
+        self._review_btn = QPushButton("REVIEW SCRIPT")
+        self._review_btn.setProperty("variant", "primary")
+        self._review_btn.setFont(theme.label_font(theme.TITLE_POINT_SIZE))
+        self._review_btn.setVisible(False)
+        self._review_btn.clicked.connect(self._review_script)
+        layout.addWidget(self._review_btn)
+
         # The live-green confirmation lamp; appears only when ready_to_save.
         self._add_btn = QPushButton(ADD_TO_DECK_COPY)
         self._add_btn.setProperty("variant", "live")
@@ -257,16 +284,25 @@ class AIBuilderPanel(QWidget):
         self._add_bubble("agent", INTRO_MESSAGE)
 
     # ---------------------------------------------------------------- API
-    def begin_session(self, macro_names: list[str], slot_count: int) -> None:
+    def begin_session(
+        self,
+        macro_names: list[str],
+        slot_count: int,
+        free_slots: list[int] | None = None,
+        scripts: list[str] | None = None,
+    ) -> None:
         """Refresh what the agent knows about the deck (called on open)."""
         self._context.existing_macros = macro_names
         self._context.deck_slot_count = slot_count
+        self._context.free_slots = free_slots or []
+        self._context.existing_scripts = scripts or []
 
     def refresh_credentials(self) -> None:
         """Settings changed: new provider/key, same conversation."""
         history = self._builder.conversation_history
         self._builder = AIBuilder(
-            self._settings.ai_provider, self._settings.ai_api_key
+            self._settings.ai_provider, self._settings.ai_api_key,
+            self._settings.ai_model,
         )
         self._builder.conversation_history = history
 
@@ -278,18 +314,32 @@ class AIBuilderPanel(QWidget):
 
     # ------------------------------------------------------------- sending
     def _send(self) -> None:
-        if self._worker is not None:
-            return  # one turn at a time
         message = self._input.toPlainText().strip()
-        if not message:
-            return
+        if message:
+            self._send_message(message)
+
+    def _send_message(self, message: str, auto: bool = False) -> None:
+        if self._worker is not None or not message:
+            return  # one turn at a time
         if not self._settings.ai_api_key:
             self.show_error("No API key — add one in Settings.")
             return
+        if auto:
+            self._auto_replies += 1
+            if self._auto_replies > 6:
+                self.show_error(
+                    "The assistant is looping on tool requests — "
+                    "send a message to nudge it."
+                )
+                return
+        else:
+            self._auto_replies = 0   # a human/explicit turn resets the guard
 
         self._input.clear()
         self._url_chip.setVisible(False)
         self._add_btn.setVisible(False)
+        self._review_btn.setVisible(False)
+        self._drop_suggestions()
         self._add_bubble("user", message)
 
         self._typing = TypingIndicator(self._settings.reduce_motion)
@@ -316,16 +366,33 @@ class AIBuilderPanel(QWidget):
 
     def _on_done(self, response: BuilderResponse) -> None:
         self._drop_typing()
+        # Tool directives shouldn't read as chatter: hide the raw show_script line
+        # and show a quiet status instead.
+        display = self._clean_reply(response.reply)
+        if response.script_request and not display:
+            display = f"↻ Reading {response.script_request}…"
         if self._stream_bubble is not None:
-            self._stream_bubble.set_text(response.reply)  # re-render with mono JSON
+            self._stream_bubble.set_text(display)   # re-render (mono JSON, cleaned)
         else:
-            self._add_bubble("agent", response.reply)
+            self._add_bubble("agent", display)
 
         if response.ready_to_save and response.partial_action is not None:
             self._pending_action = response.partial_action
+            self._pending_slot = response.target_slot
             self._add_btn.setVisible(True)
         elif "```json" in response.reply:
             self.show_error(PARSE_ERROR_COPY)
+
+        if response.script is not None:
+            self._pending_script = response.script
+            self._review_btn.setText(f"REVIEW SCRIPT — {response.script.filename}")
+            self._review_btn.setVisible(True)
+        if response.suggestions:
+            self._show_suggestions(response.suggestions)
+        # Defer the tool reply until the worker is reaped (see _on_worker_finished),
+        # otherwise _send_message would bail on "one turn at a time".
+        if response.script_request and response.script is None:
+            self._followup_request = response.script_request
         self._scroll_down()
 
     def _on_failed(self, message: str) -> None:
@@ -338,13 +405,105 @@ class AIBuilderPanel(QWidget):
             self._worker = None
         self._send_btn.setEnabled(True)
         self._stream_bubble = None
+        # Now that the turn is fully done, run any queued tool reply.
+        if self._followup_request is not None:
+            name, self._followup_request = self._followup_request, None
+            self._answer_script_request(name)
+
+    @staticmethod
+    def _clean_reply(text: str) -> str:
+        """Strip tool directives (show_script / suggestions) from displayed text."""
+        out: list[str] = []
+        skip_fence = False
+        for line in text.splitlines():
+            stripped = line.strip()
+            if skip_fence:
+                if stripped.startswith("```"):
+                    skip_fence = False
+                continue
+            if re.match(r"^```\s*(show_script|suggestions)\b", stripped):
+                skip_fence = True
+                continue
+            if re.match(r"^[`*]*\s*show_script[`*: ]+\S+\.py\b", stripped, re.I):
+                continue
+            out.append(line)
+        return "\n".join(out).strip()
 
     # ------------------------------------------------------------- helpers
     def _add_to_deck(self) -> None:
         if self._pending_action is not None:
             action, self._pending_action = self._pending_action, None
+            slot, self._pending_slot = self._pending_slot, None
             self._add_btn.setVisible(False)
-            self.action_ready.emit(action)
+            self.action_ready.emit((action, slot))
+
+    def _answer_script_request(self, name: str) -> None:
+        """The agent asked to read a script; reply with its contents."""
+        if self._scripts_dir is None:
+            return
+        clean = name.strip().replace("\\", "/").lstrip("./")
+        if clean.startswith("scripts/"):
+            clean = clean[len("scripts/"):]
+        hidden = clean.startswith("hidden/")
+        if hidden and not self._vault_unlocked():
+            self._send_message(f"There is no script named {clean}.", auto=True)
+            return
+        target = (self._scripts_dir / clean).resolve()
+        try:
+            target.relative_to(self._scripts_dir.resolve())  # stay inside the dir
+            code = target.read_text(encoding="utf-8")
+        except (OSError, ValueError):
+            self._send_message(f"There is no script named {clean}.", auto=True)
+            return
+        self._send_message(
+            f"Contents of {clean}:\n```python\n{code}\n```", auto=True
+        )
+
+    # -------------------------------------------------- suggested answers
+    def _show_suggestions(self, suggestions: list[str]) -> None:
+        """Tappable answer chips under the agent's question."""
+        self._drop_suggestions()
+        host = QWidget()
+        column = QVBoxLayout(host)
+        column.setContentsMargins(theme.BUBBLE_PADDING, 0, theme.BUBBLE_PADDING, 0)
+        column.setSpacing(theme.CONTROL_PADDING // 2 + 1)
+        for text in suggestions:
+            chip = QPushButton(text)
+            chip.setCursor(Qt.CursorShape.PointingHandCursor)
+            chip.setStyleSheet(
+                f"text-align: left; color: {theme.SIGNAL};"
+                f"border: {theme.SEAM_WIDTH}px solid {theme.SEAM};"
+            )
+            chip.clicked.connect(lambda _=False, t=text: self._send_message(t))
+            column.addWidget(chip)
+        self._suggestion_host = host
+        self._chat.insertWidget(self._chat.count() - 1, host)
+        self._scroll_down()
+
+    def _drop_suggestions(self) -> None:
+        if self._suggestion_host is not None:
+            self._chat.removeWidget(self._suggestion_host)
+            self._suggestion_host.deleteLater()
+            self._suggestion_host = None
+
+    # ------------------------------------------------------ script review
+    def _review_script(self) -> None:
+        if self._pending_script is None or self._scripts_dir is None:
+            return
+        dialog = ScriptReviewDialog(
+            self._pending_script.filename,
+            self._pending_script.code,
+            self._scripts_dir,
+            allow_hidden=self._vault_unlocked(),
+            parent=self,
+        )
+        dialog.exec()
+        if dialog.saved_path is None:
+            return  # kept pending — the lamp stays lit for another look
+        self._pending_script = None
+        self._review_btn.setVisible(False)
+        # Tell the agent where it landed so it can wire the action to it.
+        self._send_message(f"Script saved as {dialog.saved_path}")
 
     def _detect_url(self) -> None:
         self._url_chip.setVisible(

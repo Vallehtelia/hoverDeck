@@ -4,8 +4,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from hoverdeck.core.models import Action, Deck, Page
-from hoverdeck.core.steps import DelayStep, RunScriptStep
+from hoverdeck.core.models import Deck, Page
 from hoverdeck.utils.logging import get_logger
 
 log = get_logger("deck_store")
@@ -14,44 +13,13 @@ DECK_FILENAME = "deck.json"
 
 
 def sample_deck() -> Deck:
-    """Three demo keys that exercise the runner and all three LED states."""
-    hello = Action(
-        id="hello",
-        name="Hello",
-        icon="▶",
-        steps=[
-            RunScriptStep(inline_code='print("Hello from HoverDeck")'),
-        ],
-    )
-    slow_job = Action(
-        id="slow-job",
-        name="Slow job",
-        icon="⟳",
-        steps=[
-            DelayStep(ms=900),
-            RunScriptStep(inline_code='print("halfway")'),
-            DelayStep(ms=900),
-            RunScriptStep(inline_code='print("done")'),
-        ],
-    )
-    fault_demo = Action(
-        id="fault-demo",
-        name="Fault demo",
-        icon="⚠",
-        steps=[
-            RunScriptStep(inline_code='import sys; sys.exit(2)'),
-        ],
-    )
-    page = Page(
-        id="main",
-        name="Main",
-        rows=2,
-        cols=3,
-        slots={0: hello.id, 1: slow_job.id, 2: fault_demo.id},
-    )
+    """A clean, empty starter deck: one page, no keys.
+
+    New installs (and screenshots) start blank — add keys via edit mode.
+    """
     return Deck(
-        pages=[page],
-        actions={a.id: a for a in (hello, slow_job, fault_demo)},
+        pages=[Page(id="main", name="Main", rows=2, cols=3, slots={})],
+        actions={},
     )
 
 

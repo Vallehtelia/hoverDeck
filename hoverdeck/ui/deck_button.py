@@ -15,6 +15,7 @@ signal-amber), right-click offers Edit / Move / Delete.
 from __future__ import annotations
 
 from enum import Enum, auto
+from pathlib import Path
 
 from PyQt6.QtCore import (
     QEasingCurve,
@@ -39,6 +40,7 @@ from PyQt6.QtGui import (
     QPainterPath,
     QPaintEvent,
     QPen,
+    QPixmap,
 )
 from PyQt6.QtWidgets import QApplication, QWidget
 
@@ -62,6 +64,15 @@ _LED_COLOR = {
 
 EMPTY_SLOT_COPY = "+ Add a key"
 EDIT_BADGE_GLYPH = "✎"
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp", ".ico"}
+
+
+def is_image_icon(icon: str) -> bool:
+    """True if ``icon`` is a path to an existing image (vs a glyph/emoji)."""
+    if not icon or len(icon) < 4:
+        return False
+    return Path(icon).suffix.lower() in IMAGE_EXTENSIONS and Path(icon).is_file()
 
 
 class DeckButton(QWidget):
@@ -94,6 +105,15 @@ class DeckButton(QWidget):
         self._press_pos: QPoint | None = None
         self._led = LedState.IDLE
         self._led_level = 0.0  # 0..1 lamp brightness
+        self._kb_focus = False  # show the focus ring only for keyboard focus
+        self._icon_pixmap: QPixmap | None = None
+        self._reload_icon()
+        # Glass shine glides across on hover: 0.0 idle → 1.0 hovered.
+        self._glass_shift = 0.0
+        self._glass_anim = QVariantAnimation(self)
+        self._glass_anim.setDuration(theme.GLASS_MOVE_MS)
+        self._glass_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self._glass_anim.valueChanged.connect(self._set_glass_shift)
 
         self.setFixedSize(self._size, self._size)
         self.setAcceptDrops(True)
@@ -138,9 +158,18 @@ class DeckButton(QWidget):
 
     def set_action(self, action: Action | None) -> None:
         self._action = action
+        self._reload_icon()
         self.set_led_state(LedState.IDLE)
         self._apply_interactivity()
         self.update()
+
+    def _reload_icon(self) -> None:
+        """Cache an image keycap face if the icon is an image path, else None."""
+        self._icon_pixmap = None
+        if self._action is not None and is_image_icon(self._action.icon):
+            pixmap = QPixmap(self._action.icon)
+            if not pixmap.isNull():
+                self._icon_pixmap = pixmap
 
     def set_edit_mode(self, enabled: bool) -> None:
         self._edit_mode = enabled
@@ -286,22 +315,48 @@ class DeckButton(QWidget):
 
     def enterEvent(self, event: object) -> None:
         self._hover = True
+        self._animate_glass(1.0)
         self.update()
         super().enterEvent(event)  # type: ignore[arg-type]
 
     def leaveEvent(self, event: object) -> None:
         self._hover = False
         self._pressed = False
+        self._animate_glass(0.0)
         self.update()
         super().leaveEvent(event)  # type: ignore[arg-type]
 
+    def _set_glass_shift(self, value: object) -> None:
+        self._glass_shift = float(value)  # type: ignore[arg-type]
+        self.update()
+
+    def _animate_glass(self, target: float) -> None:
+        if self._reduce_motion:
+            self._glass_shift = target
+            self.update()
+            return
+        self._glass_anim.stop()
+        self._glass_anim.setStartValue(self._glass_shift)
+        self._glass_anim.setEndValue(target)
+        self._glass_anim.start()
+
     def focusInEvent(self, event: QFocusEvent) -> None:
+        # A mouse click leaves focus behind; only keyboard/arrow focus should
+        # show the amber ring, so clicking a key doesn't leave it "stuck on".
+        self._kb_focus = event.reason() not in (
+            Qt.FocusReason.MouseFocusReason,
+            Qt.FocusReason.PopupFocusReason,
+        )
         self.update()
         super().focusInEvent(event)
 
     def focusOutEvent(self, event: QFocusEvent) -> None:
+        self._kb_focus = False
         self.update()
         super().focusOutEvent(event)
+
+    def _focus_ring(self) -> bool:
+        return self.hasFocus() and self._kb_focus
 
     # -------------------------------------------------------- drag & drop
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
@@ -345,33 +400,36 @@ class DeckButton(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, radius, radius)
 
-        # Keycap face: raised 2-stop gradient (flattens while pressed).
-        base = theme.KEYCAP_HOVER if self._hover else theme.KEYCAP
-        if self._action.color:
-            base = theme.tinted_keycap(base, self._action.color)
-        top, bottom = theme.keycap_gradient(base, self._pressed)
-        gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
-        gradient.setColorAt(0.0, top)
-        gradient.setColorAt(1.0, bottom)
-        painter.fillPath(path, gradient)
-
-        # Machined glint under the top edge.
-        if not self._pressed:
+        # Keycap face: an image (cover-scaled, clipped) or a raised gradient.
+        if self._icon_pixmap is not None:
             painter.save()
             painter.setClipPath(path)
-            glint = QColor(theme.INK)
-            glint.setAlpha(theme.TOP_HIGHLIGHT_ALPHA)
-            painter.setPen(QPen(glint, 1))
-            inset = radius * 0.7
-            painter.drawLine(
-                QPointF(rect.left() + inset, rect.top() + 1.5),
-                QPointF(rect.right() - inset, rect.top() + 1.5),
-            )
+            self._paint_image_face(painter, rect)
             painter.restore()
+        else:
+            base = theme.KEYCAP_HOVER if self._hover else theme.KEYCAP
+            if self._action.color:
+                base = theme.tinted_keycap(base, self._action.color)
+            top, bottom = theme.keycap_gradient(base, self._pressed)
+            gradient = QLinearGradient(rect.topLeft(), rect.bottomLeft())
+            gradient.setColorAt(0.0, top)
+            gradient.setColorAt(1.0, bottom)
+            painter.fillPath(path, gradient)
+
+        # Soft amber wash on hover, then a glossy "glass card" overlay.
+        if not self._pressed:
+            if self._hover and self._icon_pixmap is None:
+                painter.save()
+                painter.setClipPath(path)
+                painter.fillPath(
+                    path, theme.qcolor(theme.SIGNAL, theme.KEYCAP_HOVER_GLOW_ALPHA)
+                )
+                painter.restore()
+            self._paint_glass(painter, path, rect)
 
         # Seam border; focus ring and drop target are the same line in amber.
         border = (
-            theme.SIGNAL if (self.hasFocus() or self._drop_hover) else theme.SEAM
+            theme.SIGNAL if (self._focus_ring() or self._drop_hover) else theme.SEAM
         )
         painter.setPen(QPen(theme.qcolor(border), theme.FOCUS_RING_WIDTH))
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -388,8 +446,8 @@ class DeckButton(QWidget):
         path = QPainterPath()
         path.addRoundedRect(rect, radius, radius)
         painter.fillPath(path, theme.qcolor(theme.PANEL).darker(theme.SOCKET_DARKER))
-        border = theme.SIGNAL if (self._drop_hover or self.hasFocus()) else theme.SEAM
-        alpha = 255 if (self._drop_hover or self.hasFocus()) else 160
+        border = theme.SIGNAL if (self._drop_hover or self._focus_ring()) else theme.SEAM
+        alpha = 255 if (self._drop_hover or self._focus_ring()) else 160
         painter.setPen(QPen(theme.qcolor(border, alpha), theme.SEAM_WIDTH))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(path)
@@ -403,10 +461,97 @@ class DeckButton(QWidget):
             )
         painter.end()
 
+    def _paint_glass(self, painter: QPainter, path: QPainterPath, rect: QRectF) -> None:
+        """A glossy 'glass card' overlay whose shine glides across on hover."""
+        shift = self._glass_shift           # 0 idle → 1 hovered (animated)
+        boost = int(theme.GLASS_HOVER_BOOST * shift)
+        h = rect.height()
+
+        def ink(alpha: int) -> QColor:
+            color = QColor(theme.INK)
+            color.setAlpha(max(0, min(255, alpha)))
+            return color
+
+        painter.save()
+        painter.setClipPath(path)
+
+        # Bright reflection filling the top ~half, fading down.
+        top = QLinearGradient(rect.topLeft(), QPointF(rect.left(), rect.top() + h * 0.5))
+        top.setColorAt(0.0, ink(theme.GLASS_TOP_ALPHA + boost))
+        top.setColorAt(0.45, ink(int((theme.GLASS_TOP_ALPHA + boost) * 0.35)))
+        top.setColorAt(1.0, ink(0))
+        painter.fillPath(path, top)
+
+        # Faint reflected light hugging the bottom edge (rounds out the glass).
+        lower = QLinearGradient(
+            QPointF(rect.left(), rect.bottom() - h * 0.32), rect.bottomLeft()
+        )
+        lower.setColorAt(0.0, ink(0))
+        lower.setColorAt(1.0, ink(theme.GLASS_LOWER_ALPHA + boost // 2))
+        painter.fillPath(path, lower)
+
+        # Diagonal specular streak — its peak slides down-right as you hover,
+        # so the shine reads as moving, not just brightening.
+        streak = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        bright = theme.GLASS_STREAK_ALPHA + boost
+        peak = 0.20 + 0.42 * shift
+        lead = max(0.001, peak - 0.12)
+        trail = min(0.999, peak + 0.06)
+        streak.setColorAt(0.0, ink(0))
+        streak.setColorAt(lead, ink(0))
+        streak.setColorAt(min(peak, trail - 0.001), ink(bright))
+        streak.setColorAt(trail, ink(0))
+        streak.setColorAt(1.0, ink(0))
+        painter.fillPath(path, streak)
+
+        painter.restore()
+
+    def _paint_image_face(self, painter: QPainter, rect: QRectF) -> None:
+        """Cover-scale the icon image to fill the cap, then darken the bottom."""
+        assert self._icon_pixmap is not None
+        target = rect.toRect()
+        scaled = self._icon_pixmap.scaled(
+            target.size(),
+            Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = target.x() + (target.width() - scaled.width()) // 2
+        y = target.y() + (target.height() - scaled.height()) // 2
+        painter.drawPixmap(x, y, scaled)
+        # Bottom scrim so a light label stays readable over any image.
+        scrim = QLinearGradient(
+            QPointF(rect.left(), rect.center().y()),
+            QPointF(rect.left(), rect.bottom()),
+        )
+        clear = QColor(theme.PANEL)
+        clear.setAlpha(0)
+        dark = QColor(theme.PANEL)
+        dark.setAlpha(theme.IMAGE_SCRIM_ALPHA)
+        scrim.setColorAt(0.0, clear)
+        scrim.setColorAt(1.0, dark)
+        painter.fillRect(rect, scrim)
+
     def _paint_legend(self, painter: QPainter, rect: QRectF) -> None:
         """Glyph (backlit symbol) + label plate lettering."""
         assert self._action is not None
         name = self._action.name
+
+        if self._icon_pixmap is not None:
+            # Image key: the label sits on the bottom scrim in bright ink.
+            painter.setFont(theme.label_font())
+            painter.setPen(theme.qcolor(theme.INK))
+            metrics = painter.fontMetrics()
+            pad = rect.width() * 0.08
+            text = metrics.elidedText(
+                name, Qt.TextElideMode.ElideRight, round(rect.width() - 2 * pad)
+            )
+            label_rect = QRectF(
+                rect.left() + pad, rect.bottom() - rect.height() * 0.30,
+                rect.width() - 2 * pad, rect.height() * 0.26,
+            )
+            painter.drawText(label_rect, Qt.AlignmentFlag.AlignCenter, text)
+            return
+
         glyph = self._action.icon
 
         if glyph:

@@ -7,12 +7,13 @@ import sys
 import uuid
 from typing import Callable
 
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeyEvent, QKeySequence
+from PyQt6.QtCore import Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QDesktopServices, QKeyEvent, QKeySequence
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
-    QComboBox,
     QDialog,
+    QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -20,7 +21,6 @@ from PyQt6.QtWidgets import (
     QMenu,
     QPushButton,
     QSlider,
-    QSpinBox,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -29,9 +29,21 @@ from PyQt6.QtWidgets import (
 )
 
 from hoverdeck import __version__
-from hoverdeck.core.ai_builder import AIBuilder, AIBuilderError
+from hoverdeck.core.ai_builder import (
+    API_KEY_URL,
+    MODEL_CHOICES,
+    RECOMMENDED_MODEL,
+    AIBuilder,
+    AIBuilderError,
+)
 from hoverdeck.core.models import Settings, WindowProfile
-from hoverdeck.ui import theme
+from hoverdeck.ui import screens, theme
+
+# Wheel-ignoring inputs: scrolling the settings never changes a value by accident.
+from hoverdeck.ui.widgets.no_scroll import (
+    NoScrollComboBox as QComboBox,
+    NoScrollSpinBox as QSpinBox,
+)
 
 _SLIDER_MIN = 60   # percent — mirrors theme.SCALE_MIN
 _SLIDER_MAX = 200  # percent — mirrors theme.SCALE_MAX
@@ -52,14 +64,18 @@ class _PingWorker(QThread):
     succeeded = pyqtSignal()
     failed = pyqtSignal(str)
 
-    def __init__(self, provider: str, api_key: str, parent: QWidget) -> None:
+    def __init__(self, provider: str, api_key: str, model: str,
+                 parent: QWidget) -> None:
         super().__init__(parent)
         self._provider = provider
         self._api_key = api_key
+        self._model = model
 
     def run(self) -> None:
         try:
-            asyncio.run(AIBuilder(self._provider, self._api_key).test_connection())
+            asyncio.run(
+                AIBuilder(self._provider, self._api_key, self._model).test_connection()
+            )
         except AIBuilderError as exc:
             self.failed.emit(str(exc))
         except Exception:  # noqa: BLE001
@@ -74,8 +90,9 @@ class HotkeyCapture(QLineEdit):
     def __init__(self, current: str = "", parent: QWidget | None = None) -> None:
         super().__init__(current, parent)
         self.setProperty("role", "mono")
-        self.setPlaceholderText("Click, then press keys")
+        self.setPlaceholderText("Click, then press a combo")
         self.setReadOnly(True)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def keyPressEvent(self, event: QKeyEvent) -> None:
@@ -149,13 +166,32 @@ class SettingsDialog(QDialog):
         layout.addLayout(buttons)
 
     # ---------------------------------------------------------------- General
+    def _section(self, text: str) -> QLabel:
+        """An engraved section divider for a settings form."""
+        label = QLabel(text)
+        label.setFont(theme.label_font(theme.LABEL_POINT_SIZE + 1))
+        label.setProperty("role", "dim")
+        return label
+
+    @staticmethod
+    def _form() -> QFormLayout:
+        form = QFormLayout()
+        form.setSpacing(theme.CONTROL_PADDING * 2)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        return form
+
     def _general_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setSpacing(theme.CONTROL_PADDING * 2)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(*([theme.CONTROL_PADDING * 2] * 4))
+        outer.setSpacing(theme.CONTROL_PADDING)
+        form = self._form()
 
-        size_row = QHBoxLayout()
-        size_row.addWidget(QLabel("Size"))
+        form.addRow(self._section("DISPLAY"))
+
         self._size = QSlider(Qt.Orientation.Horizontal)
         self._size.setRange(_SLIDER_MIN, _SLIDER_MAX)
         self._size.setSingleStep(_SLIDER_STEP)
@@ -165,13 +201,64 @@ class SettingsDialog(QDialog):
         self._size_label = QLabel(f"{self._size.value()}%")
         self._size_label.setProperty("role", "dim")
         self._size.valueChanged.connect(self._on_size_changed)
+        size_box = QWidget()
+        size_row = QHBoxLayout(size_box)
+        size_row.setContentsMargins(0, 0, 0, 0)
         size_row.addWidget(self._size, 1)
         size_row.addWidget(self._size_label)
-        layout.addLayout(size_row)
+        form.addRow("Size", size_box)
+
+        self._monitor = QComboBox()
+        self._monitor.addItem("Primary (auto)", "")
+        primary = QApplication.primaryScreen()
+        for screen in screens.available_screens():
+            self._monitor.addItem(
+                screens.describe(screen, screen is primary), screen.name()
+            )
+        idx = self._monitor.findData(self._settings.monitor)
+        self._monitor.setCurrentIndex(max(0, idx))
+        self._monitor.setToolTip("The deck docks to the right wall of this monitor.")
+        form.addRow("Monitor", self._monitor)
+
+        form.addRow(self._section("LAYOUT"))
+
+        self._grid_rows = QSpinBox()
+        self._grid_rows.setRange(1, 4)
+        self._grid_rows.setValue(self._settings.grid_rows)
+        self._grid_cols = QSpinBox()
+        self._grid_cols.setRange(1, 4)
+        self._grid_cols.setValue(self._settings.grid_cols)
+        grid_box = QWidget()
+        grid_row = QHBoxLayout(grid_box)
+        grid_row.setContentsMargins(0, 0, 0, 0)
+        grid_row.addWidget(self._grid_rows)
+        times = QLabel("×")
+        times.setProperty("role", "dim")
+        grid_row.addWidget(times)
+        grid_row.addWidget(self._grid_cols)
+        grid_row.addStretch(1)
+        form.addRow("Grid (rows × cols)", grid_box)
+
+        form.addRow(self._section("BEHAVIOUR"))
 
         self._reduce_motion = QCheckBox("Reduce motion (state changes are instant)")
         self._reduce_motion.setChecked(self._settings.reduce_motion)
-        layout.addWidget(self._reduce_motion)
+        form.addRow("", self._reduce_motion)
+
+        self._vpn_overlay = QCheckBox("Show VPN status (on the deck and peek lamp)")
+        self._vpn_overlay.setChecked(self._settings.vpn_overlay)
+        form.addRow("", self._vpn_overlay)
+
+        self._vpn_hint = QLineEdit(self._settings.vpn_adapter_hint)
+        self._vpn_hint.setPlaceholderText("Auto — set only if your VPN isn't detected")
+        self._vpn_hint.setToolTip(
+            "Most VPNs are detected automatically. If yours isn't, type part of "
+            "its network adapter name (see Windows network connections), "
+            "e.g. NordLynx."
+        )
+        self._vpn_hint.setEnabled(self._settings.vpn_overlay)
+        self._vpn_overlay.toggled.connect(self._vpn_hint.setEnabled)
+        form.addRow("VPN adapter", self._vpn_hint)
 
         on_windows = sys.platform == "win32"
         self._autostart = QCheckBox(
@@ -179,21 +266,17 @@ class SettingsDialog(QDialog):
         )
         self._autostart.setChecked(self._settings.autostart and on_windows)
         self._autostart.setEnabled(on_windows)
-        layout.addWidget(self._autostart)
+        form.addRow("", self._autostart)
 
-        relock_row = QHBoxLayout()
-        relock_row.addWidget(QLabel("Lock vault after"))
         self._relock = QSpinBox()
         self._relock.setRange(30, 3600)
         self._relock.setSingleStep(30)
         self._relock.setSuffix(" seconds")
         self._relock.setValue(self._settings.relock_timeout_s)
-        relock_row.addWidget(self._relock)
-        relock_row.addStretch(1)
-        layout.addLayout(relock_row)
+        form.addRow("Lock vault after", self._relock)
 
-        browse_row = QHBoxLayout()
-        browse_row.addWidget(QLabel("Last browse folder"))
+        form.addRow(self._section("FILES"))
+
         self._browse_dir_label = QLabel(
             self._settings.last_browse_dir or os.path.expanduser("~")
         )
@@ -201,12 +284,42 @@ class SettingsDialog(QDialog):
         self._browse_dir_label.setFont(theme.mono_font())
         reset_browse = QPushButton("Reset to home")
         reset_browse.clicked.connect(self._reset_browse_dir)
+        browse_box = QWidget()
+        browse_row = QHBoxLayout(browse_box)
+        browse_row.setContentsMargins(0, 0, 0, 0)
         browse_row.addWidget(self._browse_dir_label, 1)
         browse_row.addWidget(reset_browse)
-        layout.addLayout(browse_row)
+        form.addRow("Last browse folder", browse_box)
 
-        layout.addStretch(1)
+        form.addRow(self._section("SCRIPTS"))
+
+        self._script_python = QLineEdit(self._settings.script_python)
+        self._script_python.setProperty("role", "mono")
+        self._script_python.setPlaceholderText("Auto — HoverDeck's own Python")
+        self._script_python.setToolTip(
+            "Python that runs 'Run a script' steps. Point it at an environment "
+            "that has your scripts' packages (e.g. pyautogui)."
+        )
+        py_browse = QPushButton("Browse…")
+        py_browse.clicked.connect(self._browse_python)
+        py_box = QWidget()
+        py_row = QHBoxLayout(py_box)
+        py_row.setContentsMargins(0, 0, 0, 0)
+        py_row.addWidget(self._script_python, 1)
+        py_row.addWidget(py_browse)
+        form.addRow("Script interpreter", py_box)
+
+        outer.addLayout(form)
+        outer.addStretch(1)
         return tab
+
+    def _browse_python(self) -> None:
+        from hoverdeck.ui.dialogs.file_browser import FileBrowserDialog
+        path = FileBrowserDialog.get_file(
+            self, self._script_python.text().strip(), "Pick a Python interpreter"
+        )
+        if path:
+            self._script_python.setText(path)
 
     def _reset_browse_dir(self) -> None:
         home = os.path.expanduser("~")
@@ -215,53 +328,111 @@ class SettingsDialog(QDialog):
     # ---------------------------------------------------------------- AI Builder
     def _ai_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QVBoxLayout(tab)
-        layout.setSpacing(theme.CONTROL_PADDING * 2)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(*([theme.CONTROL_PADDING * 2] * 4))
+        outer.setSpacing(theme.CONTROL_PADDING)
+        form = self._form()
 
-        provider_row = QHBoxLayout()
-        provider_row.addWidget(QLabel("Provider"))
+        form.addRow(self._section("PROVIDER"))
+
         self._provider = QComboBox()
         self._provider.addItem("Anthropic", "anthropic")
         self._provider.addItem("OpenAI", "openai")
         index = self._provider.findData(self._settings.ai_provider)
         self._provider.setCurrentIndex(max(0, index))
-        provider_row.addWidget(self._provider, 1)
-        layout.addLayout(provider_row)
+        self._provider.currentIndexChanged.connect(self._on_provider_changed)
+        form.addRow("Provider", self._provider)
 
-        key_row = QHBoxLayout()
-        key_row.addWidget(QLabel("API key"))
+        self._model = QComboBox()   # fixed choice — current models per provider
+        self._model.setToolTip("Pick a model. The recommended one balances cost "
+                               "and reliable automation building.")
+        form.addRow("Model", self._model)
+
+        key_box = QWidget()
+        key_row = QHBoxLayout(key_box)
+        key_row.setContentsMargins(0, 0, 0, 0)
         self._api_key = QLineEdit(self._settings.ai_api_key)
         self._api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self._api_key.setProperty("role", "mono")
-        key_row.addWidget(self._api_key, 1)
-        layout.addLayout(key_row)
-
-        key_note = QLabel(
+        self._api_key.setToolTip(
             "Stored in settings.json on this machine; sent only to the provider."
         )
-        key_note.setProperty("role", "dim")
-        layout.addWidget(key_note)
+        self._key_help = QPushButton("Get a key…")
+        self._key_help.setToolTip("Open the provider's page to create an API key.")
+        self._key_help.clicked.connect(self._open_key_help)
+        key_row.addWidget(self._api_key, 1)
+        key_row.addWidget(self._key_help)
+        form.addRow("API key", key_box)
 
-        test_row = QHBoxLayout()
+        key_hint = QLabel("New here? Click “Get a key…”, sign in, create a key, paste it.")
+        key_hint.setProperty("role", "dim")
+        key_hint.setWordWrap(True)
+        form.addRow("", key_hint)
+
+        self._on_provider_changed()   # populate model list + key-help target
+
         self._test_btn = QPushButton("Test connection")
         self._test_btn.clicked.connect(self._test_connection)
         self._test_status = QLabel("")
+        test_box = QWidget()
+        test_row = QHBoxLayout(test_box)
+        test_row.setContentsMargins(0, 0, 0, 0)
         test_row.addWidget(self._test_btn)
         test_row.addWidget(self._test_status, 1)
-        layout.addLayout(test_row)
+        form.addRow("", test_box)
 
-        mode_row = QHBoxLayout()
-        mode_row.addWidget(QLabel("Panel"))
+        form.addRow(self._section("PANEL"))
+
         self._panel_mode = QComboBox()
         self._panel_mode.addItem("Slide into the deck", "slide")
         self._panel_mode.addItem("Float next to the deck", "floating")
         index = self._panel_mode.findData(self._settings.ai_panel_mode)
         self._panel_mode.setCurrentIndex(max(0, index))
-        mode_row.addWidget(self._panel_mode, 1)
-        layout.addLayout(mode_row)
+        form.addRow("Show as", self._panel_mode)
 
-        layout.addStretch(1)
+        self._panel_side = QComboBox()
+        self._panel_side.addItem("Auto (away from the screen edge)", "auto")
+        self._panel_side.addItem("Left of the deck", "left")
+        self._panel_side.addItem("Right of the deck", "right")
+        index = self._panel_side.findData(self._settings.ai_panel_side)
+        self._panel_side.setCurrentIndex(max(0, index))
+        form.addRow("Open on", self._panel_side)
+
+        outer.addLayout(form)
+        outer.addStretch(1)
         return tab
+
+    def _on_provider_changed(self) -> None:
+        """Rebuild the fixed model list for the chosen provider.
+
+        Switching provider lands on that provider's recommended model; only the
+        originally-saved provider keeps a custom/legacy saved id.
+        """
+        provider = self._provider.currentData()
+        recommended = RECOMMENDED_MODEL.get(provider, "")
+        # The saved model belongs to the saved provider only.
+        saved = (
+            self._settings.ai_model
+            if provider == self._settings.ai_provider else ""
+        )
+        ids = list(MODEL_CHOICES.get(provider, []))
+        if saved and saved not in ids:   # preserve a legacy/custom saved id
+            ids.append(saved)
+        self._model.blockSignals(True)
+        self._model.clear()
+        for model_id in ids:
+            label = f"{model_id}  (Recommended)" if model_id == recommended else model_id
+            self._model.addItem(label, model_id)
+        index = self._model.findData(saved) if saved else -1
+        if index < 0:
+            index = self._model.findData(recommended)
+        self._model.setCurrentIndex(max(0, index))
+        self._model.blockSignals(False)
+
+    def _open_key_help(self) -> None:
+        url = API_KEY_URL.get(self._provider.currentData())
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
 
     # ---------------------------------------------------------------- Profiles
     def _profiles_tab(self) -> QWidget:
@@ -396,7 +567,9 @@ class SettingsDialog(QDialog):
         bound = {aid: hk for hk, aid in self._settings.global_hotkeys.items()}
         self._hotkey_table = QTableWidget(len(self._actions), 3)
         self._hotkey_table.setHorizontalHeaderLabels(["Action", "Hotkey", ""])
-        self._hotkey_table.verticalHeader().setVisible(False)
+        vheader = self._hotkey_table.verticalHeader()
+        vheader.setVisible(False)
+        vheader.setDefaultSectionSize(theme.CONTROL_PADDING * 6)  # roomy rows
         header = self._hotkey_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -450,7 +623,8 @@ class SettingsDialog(QDialog):
         self._test_btn.setEnabled(False)
         self._set_test_status("Testing…", "dim")
         self._ping = _PingWorker(
-            self._provider.currentData(), self._api_key.text().strip(), self
+            self._provider.currentData(), self._api_key.text().strip(),
+            self._model.currentData() or "", self
         )
         self._ping.succeeded.connect(lambda: self._test_done(CONNECTED_COPY, "live"))
         self._ping.failed.connect(lambda msg: self._test_done(msg, "fault"))
@@ -469,13 +643,21 @@ class SettingsDialog(QDialog):
     def apply_to(self, settings: Settings) -> None:
         """Write the dialog's values into ``settings`` (called on accept)."""
         settings.scale = round(self._size.value() / _SLIDER_STEP) * _SLIDER_STEP / 100
+        settings.monitor = self._monitor.currentData()
+        settings.grid_rows = self._grid_rows.value()
+        settings.grid_cols = self._grid_cols.value()
         settings.reduce_motion = self._reduce_motion.isChecked()
+        settings.vpn_overlay = self._vpn_overlay.isChecked()
+        settings.vpn_adapter_hint = self._vpn_hint.text().strip()
         settings.autostart = self._autostart.isChecked()
         settings.relock_timeout_s = self._relock.value()
         settings.last_browse_dir = self._browse_dir_label.text()
         settings.ai_provider = self._provider.currentData()
+        settings.ai_model = self._model.currentData() or ""
         settings.ai_api_key = self._api_key.text().strip()
         settings.ai_panel_mode = self._panel_mode.currentData()
+        settings.ai_panel_side = self._panel_side.currentData()
+        settings.script_python = self._script_python.text().strip()
 
         hotkeys: dict[str, str] = {}
         for action_id, capture in self._captures:

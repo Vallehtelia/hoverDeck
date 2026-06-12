@@ -1,7 +1,7 @@
-"""PyInstaller build script — produces a single windowed exe.
+"""PyInstaller build script.
 
-Run with:  python build.py
-Output:    dist/HoverDeck.exe
+  python build.py           -> dist/HoverDeck.exe        (portable single file)
+  python build.py onedir    -> dist/HoverDeck/...        (folder; for the installer)
 """
 from __future__ import annotations
 
@@ -18,14 +18,15 @@ def main() -> None:
 
     import PyInstaller.__main__  # type: ignore[import-not-found]
 
-    fonts_src  = str(ROOT / "assets" / "fonts")
-    icons_src  = str(ROOT / "assets" / "icons")
-    icon_file  = str(ROOT / "assets" / "icons" / "hoverdeck.ico")
+    onedir = "onedir" in sys.argv
+    fonts_src = str(ROOT / "assets" / "fonts")
+    icons_src = str(ROOT / "assets" / "icons")
+    icon_file = str(ROOT / "assets" / "icons" / "hoverdeck.ico")
 
     args = [
         str(ROOT / "main.py"),
         "--name=HoverDeck",
-        "--onefile",
+        "--onedir" if onedir else "--onefile",
         "--windowed",
         f"--icon={icon_file}",
         f"--add-data={fonts_src};assets/fonts",
@@ -38,10 +39,10 @@ def main() -> None:
         "--clean",
     ]
 
-    print("Building HoverDeck.exe …")
+    print(f"Building HoverDeck ({'one-dir' if onedir else 'one-file'}) …")
     PyInstaller.__main__.run(args)
 
-    exe = ROOT / "dist" / "HoverDeck.exe"
+    exe = ROOT / "dist" / ("HoverDeck/HoverDeck.exe" if onedir else "HoverDeck.exe")
     if exe.exists():
         size_mb = exe.stat().st_size / 1_048_576
         print(f"\nDone: {exe}  ({size_mb:.1f} MB)")

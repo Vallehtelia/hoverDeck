@@ -127,3 +127,37 @@ def test_time_window_condition_round_trip() -> None:
     from hoverdeck.core.conditions import condition_from_dict
 
     assert condition_from_dict(cond.to_dict()) == cond
+
+
+def test_shell_safe_cwd_avoids_unc(monkeypatch) -> None:
+    """cmd.exe can't run from a UNC cwd; the shell step must dodge it on Windows."""
+    from hoverdeck.core.steps import shell
+
+    # An explicit cwd is always honored.
+    assert shell._safe_cwd("/some/dir") == "/some/dir"
+
+    # Non-Windows inherits the cwd (Python handles UNC fine).
+    monkeypatch.setattr(shell.sys, "platform", "linux")
+    assert shell._safe_cwd(None) is None
+
+    # Windows with no cwd -> a normal local home dir, never UNC.
+    monkeypatch.setattr(shell.sys, "platform", "win32")
+    monkeypatch.setenv("USERPROFILE", r"C:\Users\valle")
+    result = shell._safe_cwd(None)
+    assert result == r"C:\Users\valle"
+    assert not result.startswith("\\\\")
+
+
+def test_launch_args_roundtrip_and_resolution() -> None:
+    """LaunchStep carries args through JSON and resolves to app mode for a bare name."""
+    from hoverdeck.core.steps import LaunchStep, step_from_dict
+
+    step = LaunchStep(target="firefox", mode="app",
+                      args=["-private-window", "https://example.com"])
+    data = step.to_dict()
+    assert data["args"] == ["-private-window", "https://example.com"]
+    back = step_from_dict(data)
+    assert back == step
+    # Legacy launch JSON without args still loads.
+    legacy = step_from_dict({"type": "launch", "target": "https://x.com"})
+    assert legacy.args == [] and legacy.resolved_mode() == "url"

@@ -17,6 +17,8 @@ class ExecutionContext:
     """
 
     scripts_dir: Path | None = None
+    python_exe: str | None = None   # interpreter for run_script ("" / None = auto)
+    allow_hidden_scripts: bool = False  # may this run use scripts/hidden/* (vault only)?
     variables: dict[str, Any] = field(default_factory=dict)
     last_output: str = ""
     # MacroStore-compatible object (load(macro_id) -> Macro | None). Typed as
