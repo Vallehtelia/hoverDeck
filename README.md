@@ -82,20 +82,35 @@ profiles, final polish.
 
 ## Install (Windows)
 
-Grab the latest **[Releases](../../releases)** and run **`HoverDeck-Setup-x.y.z.exe`** —
-a per-user install (no admin), with a Start-menu shortcut and an uninstaller. Prefer
-no install? Download the portable **`HoverDeck.exe`** instead.
+Windows 10/11, 64-bit.
 
-The build isn't code-signed yet, so Windows SmartScreen may say *"Windows protected your
-PC"* — click **More info → Run anyway**.
+1. Open the latest release on the **[Releases](../../releases)** page.
+2. Under **Assets**, download **`HoverDeck-Setup-x.y.z.exe`** (the installer).
+3. Run it. It's a **per-user install** — no admin needed — into
+   `%LOCALAPPDATA%\Programs\HoverDeck`, with a Start-menu shortcut (and an optional
+   desktop shortcut) and an uninstaller.
+4. The build isn't code-signed yet, so Windows SmartScreen may warn *"Windows protected
+   your PC."* Click **More info → Run anyway**.
+5. Launch **HoverDeck** from the Start menu. It lives in the system tray and docks to the
+   right edge of your screen — drag the strip at the top to move it, right-click for the
+   menu, or **Quit HoverDeck** from the tray/right-click.
 
-> **The AI Builder needs your own API key.** Bring an Anthropic or OpenAI key and add it
-> in **Settings → AI Builder** (use **Get a key…** to open the provider's page). It's
-> stored locally and sent only to that provider. The rest of HoverDeck works without it.
->
-> **Scripting needs Python.** Opening apps/URLs, sending keys, shell commands, macros and
-> the deck all work on their own. **Run a script** steps (and AI-written scripts) need a
-> Python interpreter installed — point HoverDeck at it in **Settings → Script interpreter**.
+**Prefer no install?** Download the portable **`HoverDeck.exe`** from the same Assets and
+just run it. **Uninstall:** Settings → Apps, or the Start-menu *Uninstall HoverDeck*.
+
+Your decks, macros, settings and the encrypted vault are stored in
+`%APPDATA%\HoverDeck` and are left untouched by uninstalling.
+
+### First-run setup (optional)
+
+- **AI Builder** needs *your own* API key. Open **Settings → AI Builder**, click
+  **Get a key…** to open Anthropic's or OpenAI's page, create a key, and paste it. It's
+  stored locally and sent only to the provider you pick. Everything else works without it.
+- **Run-a-script** steps (and AI-written scripts) need **Python** installed — get it from
+  [python.org](https://python.org) (tick *Add to PATH*) and, if needed, point HoverDeck at
+  it in **Settings → Script interpreter**. Opening apps/URLs, sending keys, shell commands
+  and macros all work without Python.
+- **Autostart:** turn on *Start with Windows* in **Settings → General**.
 
 ## Run it (from source)
 
