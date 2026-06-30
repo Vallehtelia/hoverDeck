@@ -355,7 +355,7 @@ class SettingsDialog(QDialog):
         self._api_key.setEchoMode(QLineEdit.EchoMode.Password)
         self._api_key.setProperty("role", "mono")
         self._api_key.setToolTip(
-            "Stored in settings.json on this machine; sent only to the provider."
+            "Stored encrypted on this machine; sent only to the provider you choose."
         )
         self._key_help = QPushButton("Get a key…")
         self._key_help.setToolTip("Open the provider's page to create an API key.")

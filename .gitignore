@@ -2,9 +2,11 @@
 data/
 *.log
 
-# Secrets — settings.json holds the AI API key. The real one lives in data/ or
-# %APPDATA% (both untracked); this guards against stray copies elsewhere.
+# Secrets — the AI API key lives OS-encrypted in secrets.json (under data/ or
+# %APPDATA%, both untracked); settings.json no longer stores it. These entries
+# guard against stray copies committed from elsewhere.
 settings.json
+secrets.json
 
 # Your private scripts (incl. the hidden/ vault scripts)
 scripts/*

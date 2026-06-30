@@ -74,3 +74,39 @@ def get_autostart() -> bool:
         return True
     except OSError:
         return False
+
+
+def protect_bytes(data: bytes) -> bytes | None:
+    """DPAPI-encrypt ``data`` for the current Windows user.
+
+    Returns the encrypted blob, or ``None`` when DPAPI is unavailable
+    (non-Windows, or pywin32 missing) so the caller can fall back.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import win32crypt  # type: ignore[import-not-found]
+
+        # (data, description, entropy, reserved, prompt_struct, flags)
+        return win32crypt.CryptProtectData(data, "HoverDeck", None, None, None, 0)
+    except Exception as exc:  # noqa: BLE001 - any DPAPI failure -> fall back
+        log.warning("DPAPI encrypt failed (%s) - secret not OS-encrypted.", exc)
+        return None
+
+
+def unprotect_bytes(blob: bytes) -> bytes | None:
+    """DPAPI-decrypt a blob produced by :func:`protect_bytes`.
+
+    Returns the plaintext bytes, or ``None`` if unavailable or the blob
+    can't be decrypted (e.g. it was copied from another user/machine).
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import win32crypt  # type: ignore[import-not-found]
+
+        _description, data = win32crypt.CryptUnprotectData(blob, None, None, None, 0)
+        return data
+    except Exception as exc:  # noqa: BLE001 - wrong user/corrupt -> treat as unset
+        log.warning("DPAPI decrypt failed (%s) - treating secret as unset.", exc)
+        return None

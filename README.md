@@ -32,7 +32,7 @@ Describe what you want; the AI asks questions (with tappable answers), writes sm
 reusable scripts you review before saving, and drops a finished key on a free slot.
 The AI Builder uses **your own API key** (Anthropic or OpenAI) — add it in
 **Settings → AI Builder** (the **Get a key…** button opens the right page). It's stored
-locally in your settings and sent only to the provider you choose.
+encrypted on your machine and sent only to the provider you choose.
 
 ### Edit scripts & keys
 
@@ -105,7 +105,7 @@ Your decks, macros, settings and the encrypted vault are stored in
 
 - **AI Builder** needs *your own* API key. Open **Settings → AI Builder**, click
   **Get a key…** to open Anthropic's or OpenAI's page, create a key, and paste it. It's
-  stored locally and sent only to the provider you pick. Everything else works without it.
+  stored encrypted on your machine and sent only to the provider you pick. Everything else works without it.
 - **Run-a-script** steps (and AI-written scripts) need **Python** installed — get it from
   [python.org](https://python.org) (tick *Add to PATH*) and, if needed, point HoverDeck at
   it in **Settings → Script interpreter**. Opening apps/URLs, sending keys, shell commands
@@ -181,6 +181,17 @@ hoverdeck/ui/        all Qt: theme tokens, keycaps, overlay, tray
 scripts/             your own Python scripts (gitignored)
 data/                runtime data in dev (gitignored)
 ```
+
+## Privacy
+
+HoverDeck stores everything locally — your decks, recorded macros, settings, and
+the encrypted vault all live in `%APPDATA%\HoverDeck`. **No telemetry, no
+analytics, no account.** The only data that leaves your machine is what you type
+into the **AI Builder**, which is sent **only to the AI provider you choose**
+(Anthropic or OpenAI) using **your own API key** — stored encrypted on this
+machine, never shared with us. Recorded macros, the vault, and your scripts never
+leave your computer. Note: keys run **scripts and shell commands you create**, so
+only run automations you trust.
 
 ## License
 

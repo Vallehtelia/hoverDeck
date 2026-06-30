@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import sys
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
-from PyQt6.QtWidgets import QApplication, QSystemTrayIcon
+from PyQt6.QtCore import QObject, QThread, QTimer, pyqtSignal
+from PyQt6.QtWidgets import QApplication, QMessageBox, QSystemTrayIcon
 
 from hoverdeck import config
 from hoverdeck.core.action_runner import ActionRunner
@@ -38,6 +38,28 @@ class HoverDeckApp:
         config.ensure_dirs()
         setup_logging(config.LOG_FILE)
         self._log = get_logger("app")
+
+        # Last-resort crash handler: a windowed build has no console, so without
+        # this an unhandled exception dies silently. Log the traceback and, on
+        # the GUI thread, tell the user where it went (§5 pre-ship checklist).
+        _previous_excepthook = sys.excepthook
+
+        def _excepthook(exc_type, exc, tb):
+            if issubclass(exc_type, KeyboardInterrupt):
+                _previous_excepthook(exc_type, exc, tb)
+                return
+            self._log.critical("Unhandled exception", exc_info=(exc_type, exc, tb))
+            try:
+                if QThread.currentThread() == self.qapp.thread():
+                    QMessageBox.critical(
+                        None, "HoverDeck",
+                        "HoverDeck hit an unexpected error and may be unstable.\n\n"
+                        f"Details were saved to the log:\n{config.LOG_FILE}",
+                    )
+            except Exception:  # the handler must never raise
+                self._log.exception("Crash handler could not show a dialog.")
+
+        sys.excepthook = _excepthook
 
         loaded = theme.load_fonts(config.FONTS_DIR)
         if loaded:

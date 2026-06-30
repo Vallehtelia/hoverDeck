@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hoverdeck"
-version = "0.1.0"
+# Single source of truth: hoverdeck/__init__.py __version__ (see [tool.setuptools.dynamic]).
+dynamic = ["version"]
 description = "Frameless always-on-top desktop deck of scriptable keycaps (industrial control-panel style)."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -25,6 +26,9 @@ dev = [
     "pytest>=8.0",
     'pyinstaller>=6.0; sys_platform == "win32"',
 ]
+
+[tool.setuptools.dynamic]
+version = {attr = "hoverdeck.__version__"}
 
 [tool.setuptools.packages.find]
 include = ["hoverdeck*"]
